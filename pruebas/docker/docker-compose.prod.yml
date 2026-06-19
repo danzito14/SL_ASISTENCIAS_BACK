@@ -1,0 +1,89 @@
+# docker-compose.prod.yml — Backend + Postgres para el VPS.
+#
+# Nginx va en el HOST (ver nginx/fe-scanner.conf) y hace de reverse proxy + HTTPS.
+# El backend solo escucha en 127.0.0.1:8000, así que únicamente Nginx lo alcanza
+# (no queda expuesto a internet). Postgres no publica puerto: solo la red interna.
+#
+# Variables (POSTGRES_*, JWT_SECRET, CORS_ORIGINS) se leen del archivo .env que
+# esté JUNTO a este compose (pruebas/docker/.env). Ver env.example.
+#
+# Levantar:   docker compose -f docker-compose.prod.yml up -d --build
+# Logs:       docker compose -f docker-compose.prod.yml logs -f backend
+#
+# NOTA: init.sql y seed_roles.sql solo se ejecutan al inicializar un volumen
+# VACÍO. Si vas a restaurar un dump con datos de prueba, hazlo aparte (psql).
+
+services:
+  postgres:
+    build: .
+    image: pgvector-postgis:pg17
+    container_name: fe_postgres
+    restart: unless-stopped
+    command:
+      - "postgres"
+      - "-c"
+      - "shared_preload_libraries=pg_cron"
+      - "-c"
+      - "cron.database_name=${POSTGRES_DB:-FP_PRUEBAS}"
+      - "-c"
+      - "cron.timezone=America/Mazatlan"
+      - "-c"
+      - "TimeZone=America/Mazatlan"
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-FP_PRUEBAS}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/01_init.sql:ro
+      - ./seed_roles.sql:/docker-entrypoint-initdb.d/02_seed_roles.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB:-FP_PRUEBAS}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: ../app/back_py
+      dockerfile: Dockerfile
+    image: fe-scanner-backend:latest
+    container_name: fe_backend
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      # Base de datos: el host es el NOMBRE del servicio, no localhost.
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_USER: ${POSTGRES_USER}
+      DB_PASSWORD: ${POSTGRES_PASSWORD}
+      DB_NAME: ${POSTGRES_DB:-FP_PRUEBAS}
+      # App
+      APP_TITLE: "FE Scanner API"
+      APP_VERSION: "1.0.0"
+      DEBUG: "false"
+      # Front en producción (CORS). Ej: "https://app.tudominio.com"
+      CORS_ORIGINS: ${CORS_ORIGINS}
+      # JWT
+      JWT_SECRET: ${JWT_SECRET}
+      JWT_EXPIRE_MINUTES: "480"
+      ROLES_TOKEN_SIN_EXPIRACION: "kiosko"   # rol del scanner (antes 'scanner')
+      # Empresa "comodín" del super-admin (ve TODAS las empresas)
+      EMPRESA_ADMIN: "99"
+      # Reconocimiento facial / anti-spoof
+      PRELOAD_FACE_MODEL: "true"
+      ANTISPOOFING_ACTIVO: "true"
+      ANTISPOOF_REAL_INDEX: "1"
+      ANTISPOOF_UMBRAL: "0.6"
+      ANTISPOOF_DIV255: "false"
+    volumes:
+      # Fotos de incidencias/intentos: volumen para que PERSISTAN entre redeploys.
+      - media_data:/app/media
+    ports:
+      - "127.0.0.1:8000:8000"   # solo accesible desde el host → Nginx
+
+volumes:
+  postgres_data:
+  media_data:

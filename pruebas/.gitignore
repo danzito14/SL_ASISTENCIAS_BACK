@@ -1,0 +1,79 @@
+# Entornos virtuales
+venv/
+.venv/
+env/
+ENV/
+
+# Variables de entorno
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Distribución / empaquetado
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Logs
+*.log
+
+# Archivos temporales
+*.tmp
+*.temp
+
+# Cachés
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# VS Code
+.vscode/
+
+# PyCharm
+.idea/
+
+# Sistema operativo
+.DS_Store
+Thumbs.db
+
+# SQLite
+*.sqlite3
+*.db
+
+# Archivos de secretos
+secrets.json
+credentials.json
+serviceAccountKey.json
+
+# Docker
+docker-compose.override.yml
+
+# Archivos de respaldo
+*.bak
+*.backup
+
+# Dump local para migrar al VPS (datos + hashes; transferir por scp, NO versionar)
+db_pruebas.sql
+
+# Fotos generadas (incidencias del scanner, etc.) — NO versionar
+app/back_py/media/
+
+# Certificados
+*.pem
+*.key
+*.crt
+
+# FastAPI
+*.pid
