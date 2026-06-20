@@ -1,0 +1,63 @@
+services:
+  postgres:
+    build: .
+    image: pgvector-postgis:pg17
+    container_name: postgres_pgvector
+    restart: unless-stopped
+    command:
+      - "postgres"
+      # ── pg_cron ──────────────────────────────────────────────────────────
+      - "-c"
+      - "shared_preload_libraries=pg_cron"
+      - "-c"
+      # OJO: cron.database_name debe coincidir EXACTO con POSTGRES_DB.
+      - "cron.database_name=${POSTGRES_DB:-FP_PRUEBAS}"
+      - "-c"
+      - "cron.timezone=America/Mazatlan"
+      - "-c"
+      - "TimeZone=America/Mazatlan"
+      # ── Tuning para +20k trabajadores + HNSW + geo (ajusta a tu RAM) ──────
+      # Supuesto: contenedor con ~4 GB RAM. Si tienes más, sube proporcional.
+      - "-c"
+      - "shared_buffers=1GB" # ~25% de la RAM
+      - "-c"
+      - "effective_cache_size=3GB" # ~75% de la RAM (estimación al planner)
+      - "-c"
+      - "maintenance_work_mem=512MB" # CRÍTICO: acelera el build del índice HNSW
+      - "-c"
+      - "work_mem=32MB" # por operación de sort/hash; cuidado con muchas conexiones
+      - "-c"
+      - "max_parallel_workers=4"
+      - "-c"
+      - "max_parallel_workers_per_gather=2"
+      - "-c"
+      - "max_parallel_maintenance_workers=2" # paraleliza creación de índices
+      - "-c"
+      - "wal_compression=on" # menos WAL en cargas masivas (sync por lotes)
+      - "-c"
+      - "random_page_cost=1.1" # asume disco SSD
+      - "-c"
+      - "max_connections=200" # microservicio de sync + API + kioskos
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-root}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-secret}
+      POSTGRES_DB: ${POSTGRES_DB:-FP_PRUEBAS}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      # RECORDATORIO: init.sql SOLO corre cuando el volumen está vacío.
+      # Para reaplicar cambios en dev/staging: docker compose down -v && up.
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U ${POSTGRES_USER:-root} -d ${POSTGRES_DB:-FP_PRUEBAS}",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  postgres_data:
