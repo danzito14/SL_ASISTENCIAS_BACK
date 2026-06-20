@@ -19,6 +19,9 @@
 #   · Se agregó tuning de Postgres para +20k trabajadores + índice HNSW + geo.
 #     Ajusta los valores a la RAM real de tu VPS (abajo: supuesto ~4 GB).
 
+# Nombre de proyecto propio: aísla esta copia (volúmenes/red) de la v1.
+name: sl_asistencias
+
 services:
   postgres:
     build: .
@@ -31,7 +34,7 @@ services:
       - "-c"
       - "shared_preload_libraries=pg_cron"
       - "-c"
-      - "cron.database_name=${POSTGRES_DB:-FP_PRUEBAS}"
+      - "cron.database_name=${POSTGRES_DB:-SL_ASISTENCIAS}"
       - "-c"
       - "cron.timezone=America/Mazatlan"
       - "-c"
@@ -62,16 +65,21 @@ services:
     environment:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-      POSTGRES_DB: ${POSTGRES_DB:-FP_PRUEBAS}
+      POSTGRES_DB: ${POSTGRES_DB:-SL_ASISTENCIAS}
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      # Una sola fuente de verdad: el esquema completo + roles van en init.sql.
+      # Una sola fuente de verdad del ESQUEMA + roles RBAC de la app: init.sql (01).
+      # 02 = roles de PostgreSQL (usuarios DB) por microservicio + GRANTs.
+      # Corren en orden alfabético y SOLO con volumen vacío (primer arranque).
+      # ⚠️ PROD: cambia las contraseñas placeholder de roles_microservicio.sql
+      #    (o haz ALTER ROLE ... PASSWORD desde tu gestor de secretos tras el boot).
       - ./init.sql:/docker-entrypoint-initdb.d/01_init.sql:ro
+      - ./roles_microservicio.sql:/docker-entrypoint-initdb.d/02_roles_microservicio.sql:ro
     healthcheck:
       test:
         [
           "CMD-SHELL",
-          "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB:-FP_PRUEBAS}",
+          "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB:-SL_ASISTENCIAS}",
         ]
       interval: 10s
       timeout: 5s
@@ -79,7 +87,7 @@ services:
 
   backend:
     build:
-      context: ../app/back_py
+      context: ../app/back
       dockerfile: Dockerfile
     image: fe-scanner-backend:latest
     container_name: fe_backend
@@ -93,7 +101,7 @@ services:
       DB_PORT: "5432"
       DB_USER: ${POSTGRES_USER}
       DB_PASSWORD: ${POSTGRES_PASSWORD}
-      DB_NAME: ${POSTGRES_DB:-FP_PRUEBAS}
+      DB_NAME: ${POSTGRES_DB:-SL_ASISTENCIAS}
       # App
       APP_TITLE: "FE Scanner API"
       APP_VERSION: "1.0.0"

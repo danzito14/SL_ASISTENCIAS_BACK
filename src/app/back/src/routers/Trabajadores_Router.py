@@ -14,8 +14,9 @@ from src.schemas.AreaTrabajo_Trabajador import (
     TrabajadorUpdate,
 )
 from src.services.Trabajador_Service import trabajador_service
-from src.services.scanner_service import facial_service
+from src.services.Recognition_Service import recognition_service
 from src.services.Embedding_Service import embedding_service
+from src.services.Tenancy_Service import tenancy_service
 
 router = APIRouter(prefix="/trabajadores", tags=["Trabajadores"])
 
@@ -34,7 +35,7 @@ def registrar_trabajador(
     usuario: Usuario = Depends(usuario_actual),
 ):
     # Encapsulación: solo puedes crear trabajadores en un área de TU empresa.
-    exigir_empresa(usuario, trabajador_service.empresa_de_area(datos.id_area, db))
+    exigir_empresa(usuario, tenancy_service.empresa_de_area(datos.id_area, db))
     return trabajador_service.registrar_trabajador(datos=datos, db=db)
 
 
@@ -91,7 +92,7 @@ def actualizar_trabajador(
     exigir_empresa(usuario, trabajador_service.empresa_de_trabajador(id_trabajador, db))
     # ...y si lo cambias de área, la nueva área también debe ser de tu empresa.
     if datos.id_area is not None:
-        exigir_empresa(usuario, trabajador_service.empresa_de_area(datos.id_area, db))
+        exigir_empresa(usuario, tenancy_service.empresa_de_area(datos.id_area, db))
     return trabajador_service.actualizar_trabajador(id_trabajador=id_trabajador, datos=datos, db=db)
 
 
@@ -156,7 +157,7 @@ def capturar_embedding(
         )
 
     # 3. Abrir cámara y capturar frame
-    frame = facial_service.capturar_desde_camara(camara_id=camara_id)
+    frame = recognition_service.capturar_desde_camara(camara_id=camara_id)
     if frame is None:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -164,7 +165,7 @@ def capturar_embedding(
         )
 
     # 4. Detectar rostro y extraer embedding
-    cara = facial_service.detectar_y_extraer(frame)
+    cara = recognition_service.detectar_y_extraer(frame)
     if cara is None:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -178,7 +179,7 @@ def capturar_embedding(
         )
 
     # 4.a Anti-spoofing dedicado: rechaza foto/pantalla/papel (422)
-    facial_service.asegurar_no_spoof(frame, cara)
+    recognition_service.asegurar_no_spoof(frame, cara)
 
     # 4.b Evitar que este rostro ya esté registrado en OTRO trabajador de la empresa (409)
     id_empresa = embedding_service.empresa_de_trabajador(id_trabajador, db)
@@ -260,7 +261,7 @@ async def registrar_embedding_foto(
         )
 
     contenido = await foto.read()
-    frame = facial_service.leer_imagen(contenido)
+    frame = recognition_service.leer_imagen(contenido)
     if frame is None:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -268,7 +269,7 @@ async def registrar_embedding_foto(
         )
 
     # 4. Detectar rostro y extraer embedding
-    cara = facial_service.detectar_y_extraer(frame)
+    cara = recognition_service.detectar_y_extraer(frame)
     if cara is None:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -282,7 +283,7 @@ async def registrar_embedding_foto(
         )
 
     # 4.a Anti-spoofing dedicado: rechaza foto/pantalla/papel (422)
-    facial_service.asegurar_no_spoof(frame, cara)
+    recognition_service.asegurar_no_spoof(frame, cara)
 
     # 4.b Evitar que este rostro ya esté registrado en OTRO trabajador de la empresa (409)
     id_empresa = embedding_service.empresa_de_trabajador(id_trabajador, db)

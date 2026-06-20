@@ -11,7 +11,7 @@ class Incidencia(Base):
     Incidencias de los trabajadores (faltas, retardos, salidas/entradas sin
     registro, escaneos fuera de área, área incorrecta, acceso a otra empresa).
     Algunas las generan las funciones de la BD (validar_escaneos_lote,
-    procesar_salidas_dia); otras se registran manualmente desde el panel.
+    consolidar_asistencia_dia); otras se registran manualmente desde el panel.
 
     PK UUIDv7; id_escaneo_ref apunta a escaneos.id_escaneo (también UUID).
     id_empresa denormalizado para el aislamiento multi-tenant.

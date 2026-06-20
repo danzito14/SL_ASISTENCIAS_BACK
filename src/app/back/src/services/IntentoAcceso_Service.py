@@ -5,14 +5,13 @@ Los crea el scanner (scanner_service); aquí solo se listan/consultan, scopeados
 por la empresa de la PUERTA.
 """
 import logging
-import os
 from uuid import UUID
 
 from fastapi import HTTPException, status
 from sqlalchemy.orm import Session, joinedload
 
-from src.core.config import settings
 from src.models.IntentoAcceso_Model import IntentoAcceso
+from src.services.Media_Service import media_service
 
 logger = logging.getLogger(__name__)
 
@@ -80,25 +79,12 @@ class IntentoAccesoService:
 
     def ruta_archivo_foto(self, id_intento: UUID, db: Session) -> str | None:
         """
-        Resuelve la ruta ABSOLUTA en disco de la foto del intento (mapea ruta_foto
-        '/media/intentos/...' a la carpeta de media). None si no hay foto o falta el
-        archivo. Lanza 404 si el intento no existe.
+        Ruta ABSOLUTA en disco de la foto del intento (o None si no hay foto o falta
+        el archivo). La resolución y la defensa anti path-traversal las hace
+        media_service. Lanza 404 si el intento no existe.
         """
         intento = self.obtener(id_intento, db)
-        if not intento.ruta_foto:
-            return None
-
-        rel = intento.ruta_foto
-        if rel.startswith(settings.MEDIA_URL):
-            rel = rel[len(settings.MEDIA_URL):]
-        rel = rel.lstrip("/\\")
-
-        base = os.path.normpath(settings.media_base_dir)
-        ruta = os.path.normpath(os.path.join(base, rel))
-        if not ruta.startswith(base):  # defensa anti path-traversal
-            logger.warning("Ruta de foto fuera de media (posible traversal): %s", intento.ruta_foto)
-            return None
-        return ruta if os.path.isfile(ruta) else None
+        return media_service.ruta_archivo(intento.ruta_foto)
 
 
 intento_acceso_service = IntentoAccesoService()

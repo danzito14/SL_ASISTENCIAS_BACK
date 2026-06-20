@@ -107,9 +107,7 @@ class ReporteService:
             Trabajador, Trabajador.id_trabajador == Asistencia.id_trabajador
         )
         if id_empresa is not None:
-            q = q.join(AreaTrabajo, AreaTrabajo.id_area == Trabajador.id_area).filter(
-                AreaTrabajo.id_empresa == id_empresa
-            )
+            q = q.filter(Asistencia.id_empresa == id_empresa)  # denormalizado (access)
         if id_trabajador is not None:
             q = q.filter(Asistencia.id_trabajador == id_trabajador)
         if fecha_inicio is not None:
@@ -145,9 +143,7 @@ class ReporteService:
             Trabajador, Trabajador.id_trabajador == Incidencia.id_trabajador
         )
         if id_empresa is not None:
-            q = q.join(AreaTrabajo, AreaTrabajo.id_area == Trabajador.id_area).filter(
-                AreaTrabajo.id_empresa == id_empresa
-            )
+            q = q.filter(Incidencia.id_empresa == id_empresa)  # denormalizado (access)
         if tipo is not None:
             q = q.filter(Incidencia.tipo_incidencia == tipo)
         if id_trabajador is not None:
@@ -209,13 +205,15 @@ class ReporteService:
     def trabajadores(
         self, db: Session, id_empresa: int | None, formato: str,
     ) -> StreamingResponse:
+        # Los joins a área/empresa se conservan: el reporte muestra sus NOMBRES.
+        # El filtro por empresa sí usa el id_empresa denormalizado del trabajador.
         q = (
             db.query(Trabajador, AreaTrabajo, Empresa)
             .join(AreaTrabajo, AreaTrabajo.id_area == Trabajador.id_area)
             .join(Empresa, Empresa.id_empresa == AreaTrabajo.id_empresa)
         )
         if id_empresa is not None:
-            q = q.filter(AreaTrabajo.id_empresa == id_empresa)
+            q = q.filter(Trabajador.id_empresa == id_empresa)
 
         filas = [
             {

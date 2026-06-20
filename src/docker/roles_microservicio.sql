@@ -142,11 +142,14 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON
 -- SELECT cruzado: validar_escaneos_lote / evaluar_acceso_interno leen workers y
 -- tenancy (permiso del trabajador, tipo/empresa/geocerca de la puerta).
 GRANT SELECT ON trabajadores, puertas_acceso, area_trabajo, empresas TO svc_access;
--- Funciones que invoca (corren como INVOKER → usan los grants de svc_access):
+-- Funciones que invoca (corren como INVOKER → usan los grants de svc_access).
+-- consolidar_asistencia_dia: el scanner la llama en vivo tras cada escaneo
+-- (materializa la ENTRADA del día en asistencia).
 GRANT EXECUTE ON FUNCTION
     gen_uuid_v7(),
     validar_escaneos_lote(timestamptz),
-    evaluar_acceso_interno(integer, integer, geography, real, integer)
+    evaluar_acceso_interno(integer, integer, geography, real, integer),
+    consolidar_asistencia_dia(integer, integer, boolean)
     TO svc_access;
 
 
@@ -168,14 +171,14 @@ GRANT SELECT ON parametros_sistema TO
 -- ════════════════════════════════════════════════════════════════════════════
 -- 9) CRON + CASCADAS DE ESTADO (cruzan dominios)
 -- ────────────────────────────────────────────────────────────────────────────
--- 9a) Job nocturno: lo corre app_cron. procesar_salidas_dia() inserta asistencia
---     e incidencias y lee escaneos/empresas → grants de dominio access + lectura.
+-- 9a) Cierre diario (3 AM): lo corre app_cron. consolidar_asistencia_dia() inserta
+--     asistencia e incidencias y lee escaneos/empresas → grants de access + lectura.
 GRANT SELECT, INSERT, UPDATE ON asistencia, incidencias TO app_cron;
 GRANT SELECT ON escaneos, empresas TO app_cron;
-GRANT EXECUTE ON FUNCTION procesar_salidas_dia() TO app_cron;
+GRANT EXECUTE ON FUNCTION consolidar_asistencia_dia(integer, integer, boolean) TO app_cron;
 -- NOTA pg_cron: el job se AGENDA con privilegios sobre el esquema 'cron' (tarea
 -- de admin). Para que el job corra como app_cron, reprográmalo con su username:
---   UPDATE cron.job SET username = 'app_cron' WHERE jobname = 'procesar-salidas-diarias';
+--   UPDATE cron.job SET username = 'app_cron' WHERE jobname = 'consolidar-asistencia-diaria';
 -- (o agéndalo ya bajo ese rol). Verifica con: SELECT jobname, username FROM cron.job;
 
 -- 9b) Cascada de estado: cuando tenancy desactiva una empresa/área, el trigger

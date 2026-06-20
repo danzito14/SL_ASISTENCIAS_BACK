@@ -3,7 +3,7 @@ from fastapi import APIRouter, Depends, Query, status
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
 
-from src.core.auth import usuario_actual
+from src.core.auth import token_para_usuario, usuario_actual
 from src.core.pgdb import get_db
 from src.models.Rol_Usuario_Model import Usuario
 from src.schemas.Rol_Usuario_Schema import (
@@ -15,7 +15,6 @@ from src.schemas.Rol_Usuario_Schema import (
     TokenResponse,
 )
 from src.services.Usuario_Service import usuario_service
-from src.core.security import create_access_token
 
 router = APIRouter(prefix="/usuarios", tags=["Usuarios"])
 
@@ -40,9 +39,7 @@ def registrar_usuario(datos: UsuarioCreate, db: Session = Depends(get_db)):
 )
 def login(datos: UsuarioLogin, db: Session = Depends(get_db)):
     usuario = usuario_service.login(datos=datos, db=db)
-    token = create_access_token(
-        usuario.id_usuario, usuario.rol.nombre_rol if usuario.rol else None
-    )
+    token = token_para_usuario(usuario)
     return TokenResponse(access_token=token, usuario=usuario)
 
 
@@ -61,9 +58,7 @@ def token_oauth2(
         datos=UsuarioLogin(nombre_usuario=form.username, contrasena=form.password),
         db=db,
     )
-    token = create_access_token(
-        usuario.id_usuario, usuario.rol.nombre_rol if usuario.rol else None
-    )
+    token = token_para_usuario(usuario)
     return TokenResponse(access_token=token, usuario=usuario)
 
 

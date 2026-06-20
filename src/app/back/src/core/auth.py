@@ -19,7 +19,7 @@ from sqlalchemy.orm import Session
 
 from src.core.config import settings
 from src.core.pgdb import get_db
-from src.core.security import decode_access_token
+from src.core.security import create_access_token, decode_access_token
 from src.core.scopes import tiene_scope
 from src.models.Rol_Usuario_Model import Usuario
 
@@ -68,6 +68,28 @@ def _scope_requerido(method: str, path: str) -> str:
     return f"{recurso}:{accion}"
 
 
+def scopes_de_usuario(usuario: Usuario) -> list[str]:
+    """Lista de scopes del rol del usuario (de permisos JSONB {"scopes": [...]})."""
+    permisos = usuario.rol.permisos if (usuario.rol and usuario.rol.permisos) else {}
+    return permisos.get("scopes", []) if isinstance(permisos, dict) else []
+
+
+def token_para_usuario(usuario: Usuario) -> str:
+    """
+    Crea el JWT self-contained del usuario: además del 'sub', incrusta empresa,
+    scopes, rol e id_rol para que cualquier servicio autorice sin llamar a identity
+    (ver PLAN_MICROSERVICIOS §5). Centraliza la construcción del token del login.
+    """
+    return create_access_token(
+        id_usuario=usuario.id_usuario,
+        nombre_rol=usuario.rol.nombre_rol if usuario.rol else None,
+        empresa=usuario.empresa,
+        scopes=scopes_de_usuario(usuario),
+        id_rol=usuario.id_rol,
+        nombre_usuario=usuario.nombre_usuario,
+    )
+
+
 def _usuario_desde_token(request: Request, db: Session) -> Usuario:
     auth = request.headers.get("Authorization", "")
     if not auth.startswith("Bearer "):
@@ -108,9 +130,10 @@ def guard_scopes(request: Request, db: Session = Depends(get_db)) -> None:
     # Rutas que solo exigen estar autenticado (sin scope concreto): el usuario
     # consulta sus propios datos. El resto sí valida el scope del rol.
     if path not in RUTAS_SOLO_AUTENTICADO:
-        permisos = usuario.rol.permisos if (usuario.rol and usuario.rol.permisos) else {}
-        scopes = permisos.get("scopes", []) if isinstance(permisos, dict) else []
-
+        # El scope se valida contra el usuario FRESCO de BD (no contra el token):
+        # así una baja o un cambio de permisos surte efecto de inmediato. Los claims
+        # del token (empresa/scopes) son para los servicios que NO tienen la BD.
+        scopes = scopes_de_usuario(usuario)
         requerido = _scope_requerido(request.method, path)
         if not tiene_scope(scopes, requerido):
             raise HTTPException(

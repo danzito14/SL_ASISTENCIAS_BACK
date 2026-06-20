@@ -18,9 +18,10 @@ from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
 from fastapi import HTTPException, status
 
-from src.models.AreaTrabajo_Trabajador_Model import AreaTrabajo, Trabajador
+from src.models.AreaTrabajo_Trabajador_Model import Trabajador
 from src.models.Embedding_Model import Embedding
 from src.schemas.AreaTrabajo_Trabajador import TrabajadorCreate, TrabajadorUpdate
+from src.services.Tenancy_Service import tenancy_service
 
 logger = logging.getLogger(__name__)
 
@@ -42,12 +43,8 @@ class TrabajadorService:
         Returns:
             El trabajador creado.
         """
-        # 1. Validar que el área exista y esté activa
-        area = db.query(AreaTrabajo).filter(
-            AreaTrabajo.id_area == datos.id_area,
-            AreaTrabajo.estado == "activo",
-        ).first()
-
+        # 1. Validar que el área exista y esté activa (tenancy)
+        area = tenancy_service.obtener_area_activa(datos.id_area, db)
         if not area:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -173,10 +170,7 @@ class TrabajadorService:
         cambios = datos.model_dump(exclude_unset=True)
 
         if "id_area" in cambios and cambios["id_area"] is not None:
-            area = db.query(AreaTrabajo).filter(
-                AreaTrabajo.id_area == cambios["id_area"],
-                AreaTrabajo.estado == "activo",
-            ).first()
+            area = tenancy_service.obtener_area_activa(cambios["id_area"], db)
             if not area:
                 raise HTTPException(
                     status_code=status.HTTP_404_NOT_FOUND,
@@ -212,11 +206,6 @@ class TrabajadorService:
         return trabajador
 
     # ── Derivación de empresa (para la encapsulación por empresa) ──────────────
-    def empresa_de_area(self, id_area: int, db: Session) -> int | None:
-        """Empresa a la que pertenece un área, o None si el área no existe."""
-        fila = db.query(AreaTrabajo.id_empresa).filter(AreaTrabajo.id_area == id_area).first()
-        return fila[0] if fila else None
-
     def empresa_de_trabajador(self, id_trabajador: int, db: Session) -> int | None:
         """Empresa de un trabajador (id_empresa denormalizado), o None si no existe."""
         fila = (

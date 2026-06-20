@@ -108,8 +108,9 @@ no del request, en cualquier servicio.
 | reports → (todos) | Réplica / vistas materializadas | lectura agregada de solo lectura. |
 
 **Sincronización offline (microservicio de ingesta):** tras subir cada lote de
-escaneos, llama `SELECT * FROM validar_escaneos_lote(:desde);`. En online, el backend
-ya lo invoca al vuelo tras cada escaneo (implementado en `scanner_service`).
+escaneos, llama `validar_escaneos_lote(:desde)` y luego `consolidar_asistencia_dia(<días>)`
+para materializar entrada/salida del/los día(s) del lote. En online, el backend ya
+invoca ambas al vuelo tras cada escaneo (implementado en `scanner_service`).
 
 ---
 
@@ -129,10 +130,11 @@ ya lo invoca al vuelo tras cada escaneo (implementado en `scanner_service`).
 6. **Dos criterios de tenant**: `intentos_acceso` se scopea por la empresa de la
    **puerta**; `incidencias` por la empresa del **trabajador**. Respetarlo en `access`.
 7. **Fotos protegidas** → `media` con URLs firmadas o un gateway que valide auth+scope+empresa.
-8. **Pendiente del esquema (no del código):** `validar_escaneos_lote` no materializa
-   la asistencia de **“entrada”** (solo el job nocturno crea la “salida”). Resolver
-   esto **antes/durante** la extracción de `access` (que sea la función o el servicio
-   quien cree la entrada).
+8. **Asistencia entrada+salida (RESUELTO):** `asistencia` se **deriva** de `escaneos`
+   con `consolidar_asistencia_dia(p_dias_atras, p_id_trabajador, p_incluir_salida)`,
+   idempotente. Se llama en vivo tras cada escaneo (entrada del día), tras cada lote
+   offline, y en el cierre nocturno (cron **3 AM**, consolida *ayer* → captura salidas
+   posteriores a las 23:30). `escaneos` sigue siendo la fuente de verdad.
 
 ---
 
@@ -149,7 +151,7 @@ Definidos en `src/docker/roles_microservicio.sql` (derivados de este esquema):
 | `svc_recognition` | **SELECT** en embeddings/trabajadores/puertas/áreas/empresas |
 | `svc_access` | DML en escaneos/asistencia/incidencias/intentos/accesos + SELECT workers/tenancy + EXECUTE de las funciones de validación |
 | `svc_reports` | **SELECT** en todo (mejor contra réplica) |
-| `app_cron` | corre `procesar_salidas_dia()` (job nocturno) |
+| `app_cron` | corre `consolidar_asistencia_dia()` (cierre diario 3 AM) |
 
 Decisiones clave del script: **dueño (DDL) separado del runtime (DML)** para que una
 app comprometida no pueda `DROP`/`ALTER`; **reports de solo lectura**; **secuencias**
@@ -174,8 +176,13 @@ las funciones custom; cascadas en `SECURITY DEFINER`.
 ## 10. Próximos pasos
 
 - [ ] Aplicar `roles_microservicio.sql` en dev y conectar el monolito (o cada flujo) con su rol.
-- [ ] Añadir `empresa` y `scopes` a los claims del JWT en `identity` (core/security).
+- [x] Añadir `empresa` y `scopes` a los claims del JWT (`core/security` + `core/auth.token_para_usuario`).
+- [x] Aislar el acoplamiento a disco de fotos en `Media_Service` (scanner/incidencias/intentos delegan ahí) — costura para extraer `media`. Falta: URLs firmadas / object storage.
+- [x] Separar el motor de reconocimiento (`Recognition_Service`, sin estado) de la orquestación de acceso (`scanner_service`) — costura para extraer `recognition`. Falta: que consuma embeddings por API/réplica (no por SQL directo) y reciba/publique eventos en vez de devolver `ScanResponse`.
+- [x] Decoupling workers↔tenancy: facade `Tenancy_Service` (lecturas que otros dominios necesitan de tenancy). Workers consume el facade para validar área/derivar empresa; `Embedding_Service` ya no toca tenancy (usa `trabajadores.id_empresa` denormalizado). Falta: el facade pasa a cliente HTTP al separar BD; tenancy expondrá también puerta/dispositivo para access (#5).
+- [x] Cerrar el seam access→tenancy del scanner: lee puerta/dispositivo (empresa, existencia, ubicación) por `Tenancy_Service`, ya no por los modelos de tenancy. Falta para extraer `access`: geocerca en app (point-in-polygon con polígonos de tenancy en vez de `ST_Covers` en la BD), cascada por eventos, y el enriquecimiento de nombres de `Asistencia` (hoy `joinedload` a tenancy/puerta).
+- [x] Reports: los filtros por empresa usan el `id_empresa` denormalizado (asistencia/incidencias/trabajadores), quitando joins a tenancy innecesarios. `reports` sigue siendo agregador **read-only**; su extracción real = leer de **réplicas/vistas materializadas** (decisión de infra, no un seam de código).
 - [ ] Decidir transporte de eventos (cola/broker) para recognition→access y cascadas.
-- [ ] Cerrar el gap de asistencia “entrada” en el esquema/función.
+- [x] Cerrar el gap de asistencia “entrada” → `consolidar_asistencia_dia` (vivo + offline + cron 3 AM).
 - [ ] Definir el contrato de sincronización offline y el descargador por área del escáner.
 - [ ] Plan de migración de datos de producción (serial→UUID) — documento aparte.

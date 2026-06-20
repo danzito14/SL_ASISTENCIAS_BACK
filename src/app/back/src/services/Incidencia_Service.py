@@ -8,7 +8,6 @@ desde el panel (revisar, justificar, corregir).
 """
 
 import logging
-import os
 from datetime import date, datetime, timedelta, timezone
 from uuid import UUID
 
@@ -17,11 +16,11 @@ from sqlalchemy.orm import Session, joinedload
 from sqlalchemy.exc import IntegrityError
 from fastapi import HTTPException, status
 
-from src.core.config import settings
 from src.models.Incidencia_Model import Incidencia
 from src.models.IntentoAcceso_Model import IntentoAcceso
 from src.models.AreaTrabajo_Trabajador_Model import Trabajador
 from src.schemas.Incidencia_Schema import IncidenciaCreate, IncidenciaUpdate
+from src.services.Media_Service import media_service
 
 # Texto legible para describir un intento en la vista combinada.
 _DESC_INTENTO = {
@@ -341,27 +340,12 @@ class IncidenciaService:
 
     def ruta_archivo_foto(self, id_incidencia: UUID, db: Session) -> str | None:
         """
-        Resuelve la ruta ABSOLUTA en disco de la foto de una incidencia, mapeando
-        `ruta_foto` (URL web, ej. '/media/incidencias/escaneo_5.jpg') a la carpeta
-        de media. Devuelve None si la incidencia no tiene foto o el archivo no existe.
-        Lanza 404 si la incidencia no existe.
+        Ruta ABSOLUTA en disco de la foto de la incidencia (o None si no tiene foto
+        o el archivo no existe). La resolución y la defensa anti path-traversal las
+        hace media_service. Lanza 404 si la incidencia no existe.
         """
         incidencia = self.obtener_incidencia(id_incidencia, db)
-        if not incidencia.ruta_foto:
-            return None
-
-        rel = incidencia.ruta_foto
-        if rel.startswith(settings.MEDIA_URL):
-            rel = rel[len(settings.MEDIA_URL):]
-        rel = rel.lstrip("/\\")
-
-        base = os.path.normpath(settings.media_base_dir)
-        ruta = os.path.normpath(os.path.join(base, rel))
-        # Defensa anti path-traversal: la ruta debe quedar dentro de la carpeta media.
-        if not ruta.startswith(base):
-            logger.warning("Ruta de foto fuera de media (posible traversal): %s", incidencia.ruta_foto)
-            return None
-        return ruta if os.path.isfile(ruta) else None
+        return media_service.ruta_archivo(incidencia.ruta_foto)
 
 
 incidencia_service = IncidenciaService()

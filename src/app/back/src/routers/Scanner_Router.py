@@ -9,7 +9,8 @@ from sqlalchemy.orm import Session
 from src.core.pgdb import get_db
 from src.schemas.AreaTrabajo_Trabajador import TrabajadorBrief
 from src.schemas.Asistencia_HistorialAuditoria import ScanResponse
-from src.services.scanner_service import facial_service
+from src.services.scanner_service import scanner_service
+from src.services.Recognition_Service import recognition_service
 
 router = APIRouter(prefix="/scanner", tags=["Scanner"])
 
@@ -47,7 +48,7 @@ def identificar(
     db: Session = Depends(get_db),
 ):
     # 1. Capturar frame desde la cámara
-    frame = facial_service.capturar_desde_camara(camara_id=camara_id)
+    frame = recognition_service.capturar_desde_camara(camara_id=camara_id)
     if frame is None:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -55,7 +56,7 @@ def identificar(
         )
 
     # 2. Detectar rostro y extraer embedding
-    cara = facial_service.detectar_y_extraer(frame)
+    cara = recognition_service.detectar_y_extraer(frame)
     if cara is None:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -63,7 +64,7 @@ def identificar(
         )
 
     # 3. Buscar el rostro en la BD
-    match = facial_service.buscar_en_bd(cara["embedding"], db)
+    match = recognition_service.buscar_en_bd(cara["embedding"], db)
     if match is None:
         return IdentificacionResponse(
             reconocido=False,
@@ -101,14 +102,14 @@ def acceso(
     longitud: float | None = None,
     db: Session = Depends(get_db),
 ):
-    frame = facial_service.capturar_desde_camara(camara_id=camara_id)
+    frame = recognition_service.capturar_desde_camara(camara_id=camara_id)
     if frame is None:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="No se capturó ningún frame. Cámara no disponible o captura cancelada.",
         )
 
-    return facial_service.procesar_frame_acceso(
+    return scanner_service.procesar_frame_acceso(
         frame=frame,
         id_puerta=id_puerta,
         tipo_registro=tipo_registro,
@@ -126,7 +127,7 @@ async def _leer_foto(foto: UploadFile):
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"El archivo debe ser una imagen. Recibido: {foto.content_type}.",
         )
-    frame = facial_service.leer_imagen(await foto.read())
+    frame = recognition_service.leer_imagen(await foto.read())
     if frame is None:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -148,14 +149,14 @@ async def identificar_foto(
 ):
     frame = await _leer_foto(foto)
 
-    cara = facial_service.detectar_y_extraer(frame)
+    cara = recognition_service.detectar_y_extraer(frame)
     if cara is None:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="No se detectó ningún rostro en la imagen.",
         )
 
-    match = facial_service.buscar_en_bd(cara["embedding"], db)
+    match = recognition_service.buscar_en_bd(cara["embedding"], db)
     if match is None:
         return IdentificacionResponse(
             reconocido=False,
@@ -198,7 +199,7 @@ async def acceso_foto(
     # Comparte el mismo tope de 3 verificaciones concurrentes que /acceso/liveness.
     async with _sem_verificacion:
         return await run_in_threadpool(
-            facial_service.procesar_frame_acceso,
+            scanner_service.procesar_frame_acceso,
             frame=frame,
             id_puerta=id_puerta,
             tipo_registro=tipo_registro,
@@ -242,7 +243,7 @@ async def acceso_liveness(
     # al resto de peticiones del servidor.
     async with _sem_verificacion:
         return await run_in_threadpool(
-            facial_service.procesar_frames_acceso,
+            scanner_service.procesar_frames_acceso,
             frames=frames,
             id_puerta=id_puerta,
             tipo_registro=tipo_registro,

@@ -1,3 +1,7 @@
+# Nombre de proyecto propio: aísla esta copia (volúmenes/red) de la v1, aunque
+# ambas vivan en una carpeta 'docker'. El volumen será sl_asistencias_postgres_data.
+name: sl_asistencias
+
 services:
   postgres:
     build: .
@@ -11,7 +15,7 @@ services:
       - "shared_preload_libraries=pg_cron"
       - "-c"
       # OJO: cron.database_name debe coincidir EXACTO con POSTGRES_DB.
-      - "cron.database_name=${POSTGRES_DB:-FP_PRUEBAS}"
+      - "cron.database_name=${POSTGRES_DB:-SL_ASISTENCIAS}"
       - "-c"
       - "cron.timezone=America/Mazatlan"
       - "-c"
@@ -41,19 +45,22 @@ services:
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-root}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-secret}
-      POSTGRES_DB: ${POSTGRES_DB:-FP_PRUEBAS}
+      POSTGRES_DB: ${POSTGRES_DB:-SL_ASISTENCIAS}
     ports:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      # RECORDATORIO: init.sql SOLO corre cuando el volumen está vacío.
-      # Para reaplicar cambios en dev/staging: docker compose down -v && up.
-      - ./init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      # RECORDATORIO: estos scripts SOLO corren cuando el volumen está vacío y en
+      # orden alfabético. Para reaplicar cambios en dev/staging: down -v && up.
+      # 01 = esquema; 02 = roles (usuarios DB) por microservicio. El orden importa:
+      # los roles referencian tablas/funciones creadas en 01.
+      - ./init.sql:/docker-entrypoint-initdb.d/01_init.sql:ro
+      - ./roles_microservicio.sql:/docker-entrypoint-initdb.d/02_roles_microservicio.sql:ro
     healthcheck:
       test:
         [
           "CMD-SHELL",
-          "pg_isready -U ${POSTGRES_USER:-root} -d ${POSTGRES_DB:-FP_PRUEBAS}",
+          "pg_isready -U ${POSTGRES_USER:-root} -d ${POSTGRES_DB:-SL_ASISTENCIAS}",
         ]
       interval: 10s
       timeout: 5s

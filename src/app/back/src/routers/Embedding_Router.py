@@ -11,7 +11,7 @@ from src.schemas.Embedding_Schema import (
     EmbeddingUpdate,
 )
 from src.services.Embedding_Service import embedding_service
-from src.services.scanner_service import facial_service
+from src.services.Recognition_Service import recognition_service
 
 router = APIRouter(prefix="/embeddings", tags=["Embeddings"])
 
@@ -120,7 +120,7 @@ async def reemplazar_embedding_foto(
         )
 
     contenido = await foto.read()
-    frame = facial_service.leer_imagen(contenido)
+    frame = recognition_service.leer_imagen(contenido)
     if frame is None:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -128,7 +128,7 @@ async def reemplazar_embedding_foto(
         )
 
     # 3. Detectar rostro y extraer embedding
-    cara = facial_service.detectar_y_extraer(frame)
+    cara = recognition_service.detectar_y_extraer(frame)
     if cara is None:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -142,7 +142,7 @@ async def reemplazar_embedding_foto(
         )
 
     # 4. Anti-spoofing dedicado: rechaza foto/pantalla/papel (422)
-    facial_service.asegurar_no_spoof(frame, cara)
+    recognition_service.asegurar_no_spoof(frame, cara)
 
     # 5. Evitar que la nueva cara pertenezca a OTRO trabajador de la misma empresa
     #    (se excluye a sí mismo)

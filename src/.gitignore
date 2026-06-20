@@ -68,7 +68,7 @@ docker-compose.override.yml
 db_pruebas.sql
 
 # Fotos generadas (incidencias del scanner, etc.) — NO versionar
-app/back_py/media/
+app/back/media/
 
 # Certificados
 *.pem

@@ -1,5 +1,5 @@
 -- ╔══════════════════════════════════════════════════════════════════════════╗
--- ║  init.sql — Esquema consolidado FP_PRUEBAS                                  ║
+-- ║  init.sql — Esquema consolidado SL_ASISTENCIAS                              ║
 -- ║  Control de asistencia biométrico · multi-tenant · offline-first           ║
 -- ║                                                                            ║
 -- ║  Diseñado para: +20k trabajadores · múltiples empresas en una sola BD ·    ║
@@ -965,35 +965,49 @@ $$;
 
 
 -- ════════════════════════════════════════════════════════════════════════════
--- 9) JOB NOCTURNO: procesar el día (cierre de salidas + incidencias)
+-- 9) CONSOLIDACIÓN DIARIA DE ASISTENCIA  (entrada + salida, derivada de escaneos)
 -- ────────────────────────────────────────────────────────────────────────────
--- Por cada trabajador con escaneos "hoy" (en SU zona horaria de empresa):
---   · 2+ escaneos -> el ÚLTIMO se registra como 'salida' en asistencia
---   · 1 escaneo    -> incidencia 'entrada_sin_registro'
+-- Materializa 'asistencia' a partir de 'escaneos' (la fuente de verdad). Por cada
+-- trabajador con escaneos válidos del día (en SU zona horaria de empresa):
+--   · ENTRADA = primer escaneo del día        -> fila 'entrada' en asistencia
+--   · SALIDA  = último escaneo (si hay 2+)     -> fila 'salida'  en asistencia
+--   · 1 solo escaneo                            -> incidencia 'entrada_sin_registro'
 --
--- CORRECCIONES vs versión vieja:
---   · Multi-tenant TZ: "el día" se calcula con empresas.zona_horaria, no con
---     CURRENT_DATE del servidor (que cortaría mal para empresas en otro huso).
---   · Usa creado_en_cliente (hora real del evento) cuando existe.
---   · IDs UUIDv7 (las PKs de asistencia/incidencias se autogeneran).
--- Idempotente: NOT EXISTS evita duplicar si corre dos veces.
+-- Se DERIVA (no se inserta a mano): da igual el orden de llegada (offline) y se
+-- puede correr N veces sin duplicar (NOT EXISTS). Se llama en 3 momentos, SIEMPRE
+-- con esta misma función:
+--   · Online, tras cada escaneo   -> consolidar_asistencia_dia(0, <trab>, FALSE)
+--                                    (ENTRADA en vivo; la salida aún no es definitiva)
+--   · Tras cada lote offline      -> consolidar_asistencia_dia(<días>, NULL, TRUE)
+--   · Cierre nocturno (cron 3 AM) -> consolidar_asistencia_dia()  [= ayer, con salida]
+--
+-- Parámetros:
+--   p_dias_atras     0 = día en curso; 1 = ayer (default, cierre nocturno).
+--   p_id_trabajador  NULL = todos; si se pasa, solo ese trabajador (uso en vivo).
+--   p_incluir_salida FALSE durante el día (salida/incidencia se difieren al cierre).
+-- Multi-tenant TZ: "el día" se calcula con empresas.zona_horaria; usa creado_en_cliente.
 -- ════════════════════════════════════════════════════════════════════════════
-CREATE OR REPLACE FUNCTION procesar_salidas_dia()
-RETURNS TABLE(salidas_registradas INT, incidencias_creadas INT)
+CREATE OR REPLACE FUNCTION consolidar_asistencia_dia(
+    p_dias_atras     INT     DEFAULT 1,
+    p_id_trabajador  INT     DEFAULT NULL,
+    p_incluir_salida BOOLEAN DEFAULT TRUE
+)
+RETURNS TABLE(entradas_creadas INT, salidas_creadas INT, incidencias_creadas INT)
 LANGUAGE plpgsql
 AS $$
 DECLARE
+    v_entradas    INT := 0;
     v_salidas     INT := 0;
     v_incidencias INT := 0;
 BEGIN
     WITH params AS (
-        -- "Inicio del día" de cada empresa según su zona horaria, expresado en UTC.
+        -- Ventana del día objetivo (hoy - p_dias_atras) por empresa, en UTC.
         SELECT em.id_empresa,
                em.zona_horaria,
-               (date_trunc('day', timezone(em.zona_horaria, now())))            AS dia_local_inicio,
-               (date_trunc('day', timezone(em.zona_horaria, now())) AT TIME ZONE em.zona_horaria) AS ini_utc,
-               (date_trunc('day', timezone(em.zona_horaria, now())) AT TIME ZONE em.zona_horaria
-                    + INTERVAL '1 day')                                          AS fin_utc
+               ((date_trunc('day', timezone(em.zona_horaria, now()))
+                    - make_interval(days => p_dias_atras)) AT TIME ZONE em.zona_horaria)                  AS ini_utc,
+               ((date_trunc('day', timezone(em.zona_horaria, now()))
+                    - make_interval(days => p_dias_atras)) AT TIME ZONE em.zona_horaria + INTERVAL '1 day') AS fin_utc
         FROM empresas em
         WHERE em.estado = 'activo'
     ),
@@ -1002,39 +1016,67 @@ BEGIN
         SELECT e.*,
                COALESCE(e.creado_en_cliente, e.fecha_hora) AS momento,
                p.id_empresa AS emp,
-               p.ini_utc, p.fin_utc,
                (timezone(p.zona_horaria, COALESCE(e.creado_en_cliente, e.fecha_hora)))::date AS fecha_local
         FROM escaneos e
         JOIN params p ON p.id_empresa = e.id_empresa
         WHERE COALESCE(e.creado_en_cliente, e.fecha_hora) >= p.ini_utc
           AND COALESCE(e.creado_en_cliente, e.fecha_hora) <  p.fin_utc
           AND e.estado_registro IN ('exitoso','manual')
+          AND (p_id_trabajador IS NULL OR e.id_trabajador = p_id_trabajador)
     ),
     conteo AS (
-        SELECT id_trabajador, COUNT(*) AS n
-        FROM ev GROUP BY id_trabajador
+        SELECT id_trabajador, COUNT(*) AS n FROM ev GROUP BY id_trabajador
     ),
-    ultimo AS (
+    primero AS (   -- primer escaneo del día = ENTRADA
+        SELECT DISTINCT ON (id_trabajador)
+            id_trabajador, id_puerta, emp, momento,
+            confianza_biometrica, estado_registro, dentro_de_area,
+            id_dispositivo, ubicacion
+        FROM ev
+        ORDER BY id_trabajador, momento ASC
+    ),
+    ultimo AS (    -- último escaneo del día = SALIDA (si hay 2+)
         SELECT DISTINCT ON (id_trabajador)
             id_escaneo, id_trabajador, id_puerta, emp, momento, fecha_local,
-            confianza_biometrica, estado_registro, observaciones,
+            confianza_biometrica, estado_registro, dentro_de_area,
             id_dispositivo, ubicacion
         FROM ev
         ORDER BY id_trabajador, momento DESC
     ),
+    ins_entradas AS (
+        INSERT INTO asistencia (
+            id_trabajador, id_puerta, id_empresa, tipo_registro, fecha_hora,
+            confianza_biometrica, estado_registro, dentro_de_area, observaciones,
+            id_dispositivo, ubicacion, creado_en_cliente
+        )
+        SELECT pr.id_trabajador, pr.id_puerta, pr.emp, 'entrada', pr.momento,
+               pr.confianza_biometrica, pr.estado_registro, pr.dentro_de_area,
+               'Entrada (primer escaneo del día).',
+               pr.id_dispositivo, pr.ubicacion, pr.momento
+        FROM primero pr
+        WHERE NOT EXISTS (
+            SELECT 1 FROM asistencia a
+            WHERE a.id_trabajador = pr.id_trabajador
+              AND a.tipo_registro = 'entrada'
+              AND a.fecha_hora >= (SELECT ini_utc FROM params WHERE id_empresa = pr.emp)
+              AND a.fecha_hora <  (SELECT fin_utc FROM params WHERE id_empresa = pr.emp)
+        )
+        RETURNING 1
+    ),
     ins_salidas AS (
         INSERT INTO asistencia (
             id_trabajador, id_puerta, id_empresa, tipo_registro, fecha_hora,
-            confianza_biometrica, estado_registro, observaciones,
+            confianza_biometrica, estado_registro, dentro_de_area, observaciones,
             id_dispositivo, ubicacion, creado_en_cliente
         )
         SELECT u.id_trabajador, u.id_puerta, u.emp, 'salida', u.momento,
-               u.confianza_biometrica, u.estado_registro,
+               u.confianza_biometrica, u.estado_registro, u.dentro_de_area,
                'Salida inferida (último escaneo del día).',
                u.id_dispositivo, u.ubicacion, u.momento
         FROM ultimo u
         JOIN conteo c ON c.id_trabajador = u.id_trabajador
-        WHERE c.n >= 2
+        WHERE p_incluir_salida
+          AND c.n >= 2
           AND NOT EXISTS (
               SELECT 1 FROM asistencia a
               WHERE a.id_trabajador = u.id_trabajador
@@ -1052,7 +1094,8 @@ BEGIN
                'Solo un escaneo en el día; sin salida detectable.', u.id_escaneo
         FROM ultimo u
         JOIN conteo c ON c.id_trabajador = u.id_trabajador
-        WHERE c.n = 1
+        WHERE p_incluir_salida
+          AND c.n = 1
           AND NOT EXISTS (
               SELECT 1 FROM incidencias i
               WHERE i.id_trabajador = u.id_trabajador
@@ -1061,31 +1104,37 @@ BEGIN
           )
         RETURNING 1
     )
-    SELECT (SELECT COUNT(*) FROM ins_salidas),
+    SELECT (SELECT COUNT(*) FROM ins_entradas),
+           (SELECT COUNT(*) FROM ins_salidas),
            (SELECT COUNT(*) FROM ins_incid)
-    INTO v_salidas, v_incidencias;
+    INTO v_entradas, v_salidas, v_incidencias;
 
-    RAISE NOTICE 'Salidas: %, Incidencias: %', v_salidas, v_incidencias;
-    salidas_registradas := v_salidas;
+    RAISE NOTICE 'Entradas: %, Salidas: %, Incidencias: %', v_entradas, v_salidas, v_incidencias;
+    entradas_creadas    := v_entradas;
+    salidas_creadas     := v_salidas;
     incidencias_creadas := v_incidencias;
     RETURN NEXT;
 END;
 $$;
 
--- Programar el job (diario 11:30 PM hora del servidor). Idempotente: si ya
--- existe un job con ese nombre, lo reprograma.
+-- Programar el cierre diario a las 3:00 AM (zona del cron = America/Mazatlan, ver
+-- docker-compose). A esa hora ya no queda nadie marcando (los que salen pasadas
+-- las 23:30 ya cerraron) y no hay turnos de madrugada, así que el día PREVIO está
+-- completo: por eso se consolida AYER (consolidar_asistencia_dia() usa p_dias_atras=1).
+-- Idempotente: si ya existe el job (nombre viejo o nuevo), se reprograma.
 DO $$
 BEGIN
-    PERFORM cron.unschedule('procesar-salidas-diarias')
-    WHERE EXISTS (SELECT 1 FROM cron.job WHERE jobname = 'procesar-salidas-diarias');
+    PERFORM cron.unschedule(jobname)
+    FROM cron.job
+    WHERE jobname IN ('procesar-salidas-diarias', 'consolidar-asistencia-diaria');
 EXCEPTION WHEN OTHERS THEN
     NULL;  -- si pg_cron no está listo aún, se ignora
 END $$;
 
 SELECT cron.schedule(
-    'procesar-salidas-diarias',
-    '30 23 * * *',
-    $cron$ SELECT procesar_salidas_dia(); $cron$
+    'consolidar-asistencia-diaria',
+    '0 3 * * *',
+    $cron$ SELECT consolidar_asistencia_dia(); $cron$
 );
 
 

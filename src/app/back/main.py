@@ -52,9 +52,9 @@ async def lifespan(app: FastAPI):
     # request. Apagado por defecto para que los reloads de desarrollo sean rápidos.
     # Actívalo en producción con PRELOAD_FACE_MODEL=true en el .env.
     if getattr(settings, "PRELOAD_FACE_MODEL", False):
-        from src.services.scanner_service import facial_service
+        from src.services.Recognition_Service import recognition_service
         logger.info("Precargando modelo facial...")
-        facial_service.precargar()
+        recognition_service.precargar()
 
     yield
 

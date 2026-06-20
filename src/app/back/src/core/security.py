@@ -46,20 +46,47 @@ def verify_password(contrasena: str, hash_guardado: str) -> bool:
 
 # ── JWT ───────────────────────────────────────────────────────────────────────
 
-def create_access_token(id_usuario: int, nombre_rol: str | None = None) -> str:
+def create_access_token(
+    id_usuario: int,
+    nombre_rol: str | None = None,
+    empresa: int | None = None,
+    scopes: list[str] | None = None,
+    id_rol: int | None = None,
+    nombre_usuario: str | None = None,
+) -> str:
     """
-    Genera un JWT de acceso cuyo 'sub' es el id del usuario.
+    Genera un JWT de acceso SELF-CONTAINED cuyo 'sub' es el id del usuario.
+
+    Claims (además de sub/iat/exp):
+      - empresa:        tenant del usuario (99 = super-admin).
+      - scopes:         lista de permisos del rol (p. ej. ["*:read", "scanner:use"]).
+      - rol / id_rol:   rol efectivo.
+      - nombre_usuario: para trazabilidad/logs.
+    Con esto, CUALQUIER microservicio puede autorizar leyendo el token, sin
+    consultar a 'identity' (ver PLAN_MICROSERVICIOS §5). El monolito sigue
+    cargando el usuario fresco en cada request (baja/cambios de permiso en vivo).
 
     La expiración depende del rol:
-      - Si el rol está en settings.roles_token_sin_expiracion (p. ej. 'scanner'),
+      - Si el rol está en settings.roles_token_sin_expiracion (p. ej. 'kiosko'),
         el token se emite SIN claim 'exp' (no expira), aunque JWT_EXPIRE_MINUTES > 0.
       - En otro caso se usa JWT_EXPIRE_MINUTES (0 o negativo = no expira).
     """
     ahora = datetime.now(timezone.utc)
-    payload = {
+    payload: dict = {
         "sub": str(id_usuario),
         "iat": ahora,
     }
+    if empresa is not None:
+        payload["empresa"] = empresa
+    if scopes is not None:
+        payload["scopes"] = scopes
+    if nombre_rol is not None:
+        payload["rol"] = nombre_rol
+    if id_rol is not None:
+        payload["id_rol"] = id_rol
+    if nombre_usuario is not None:
+        payload["nombre_usuario"] = nombre_usuario
+
     sin_expiracion = nombre_rol is not None and nombre_rol in settings.roles_token_sin_expiracion
     if not sin_expiracion and settings.JWT_EXPIRE_MINUTES and settings.JWT_EXPIRE_MINUTES > 0:
         payload["exp"] = ahora + timedelta(minutes=settings.JWT_EXPIRE_MINUTES)

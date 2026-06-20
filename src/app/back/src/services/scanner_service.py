@@ -1,49 +1,42 @@
-# app/services/facial_service.py
+# app/services/scanner_service.py
 """
-Servicio de reconocimiento facial usando InsightFace.
+Orquestación de ACCESO por reconocimiento facial (dominio access/attendance).
 
-Responsabilidades:
-  - Inicializar el modelo InsightFace (buffalo_l)
-  - Detectar rostros en un frame
-  - Validar anti-spoofing (cara real vs foto/pantalla)
-  - Extraer embedding facial (ArcFace, 512 dims)
-  - Comparar embedding contra BD usando pgvector
-  - Registrar escaneo
+Toma el resultado del motor de reconocimiento (recognition_service) y:
+  - registra el Escaneo, lo valida (validar_escaneos_lote) y consolida la asistencia
+    del día (consolidar_asistencia_dia)
+  - clasifica y registra los intentos rechazados (spoofing / desconocido / otra_empresa)
+  - guarda las fotos (media_service) de incidencias e intentos
+
+El reconocimiento PURO (detección, embedding, liveness, anti-spoof, match) vive en
+recognition_service. Esta separación es la costura para extraer 'recognition' como
+microservicio compute-heavy (ver PLAN_MICROSERVICIOS §9): aquí queda lo que escribe
+en la BD (dominio access); allá lo que solo computa.
 """
+import logging
+from datetime import date, datetime, timezone
 
-import os
-import threading
-
-import cv2
 import numpy as np
-import insightface
-from insightface.app import FaceAnalysis
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 from fastapi import HTTPException, status
 
-from src.core.config import settings
-from src.models.AreaTrabajo_Trabajador_Model import Trabajador
-from src.models.Embedding_Model import Embedding
-from src.models.Dispositivo_PuertaAcceso_Model import Dispositivo, PuertaAcceso
 from src.models.Escaneo_Model import Escaneo
 from src.models.Incidencia_Model import Incidencia
 from src.models.IntentoAcceso_Model import IntentoAcceso
 from src.schemas.Asistencia_HistorialAuditoria import ScanResponse
 from src.schemas.AreaTrabajo_Trabajador import TrabajadorBrief
 from src.schemas._geo import punto_desde_latlon
-from src.services.antispoof_service import antispoof_service
-from datetime import date, datetime, timezone
-import logging
-
-# Carpeta en disco donde se guardan las fotos de incidencias (ruta absoluta).
-_MEDIA_BASE = settings.media_base_dir
+from src.services.Media_Service import media_service
+from src.services.Tenancy_Service import tenancy_service
+from src.services.Recognition_Service import (
+    recognition_service,
+    SIMILITUD_UMBRAL,
+    LIVENESS_MIN_FRAMES_CON_ROSTRO,
+)
 
 logger = logging.getLogger(__name__)
-
-# ── Umbral de similitud coseno para considerar un match (0.0 - 1.0) ──────────
-SIMILITUD_UMBRAL = 0.5
 
 # ── Piso de DETECCIÓN para registrar un intento "desconocido" ────────────────
 # Un desconocido real se parece POCO a todos (similitud baja), así que el filtro
@@ -52,217 +45,10 @@ SIMILITUD_UMBRAL = 0.5
 # desconocido; si la detección es pobre (rostro borroso/parcial) se ignora.
 UMBRAL_DET_DESCONOCIDO = 0.70
 
-# ── Umbral anti-spoofing (score > umbral = cara real) ────────────────────────
-SPOOFING_UMBRAL = 0.5
 
-# ── Liveness multi-frame (modo permisivo) ────────────────────────────────────
-# Mínimo de frames (de los enviados) en los que se debe detectar un rostro.
-LIVENESS_MIN_FRAMES_CON_ROSTRO = 2
-# Similitud coseno mínima entre los embeddings de los frames para aceptar que
-# son la MISMA persona. Si baja de esto, se mezclaron rostros distintos.
-LIVENESS_MISMA_PERSONA_UMBRAL = 0.45
-# Movimiento mínimo de los landmarks entre frames (desplazamiento promedio
-# normalizado por el ancho de la cara). Por debajo = foto estática.
-LIVENESS_MOVIMIENTO_MIN = 0.004
+class ScannerService:
 
-
-class FacialService:
-
-    def __init__(self):
-        self._app: FaceAnalysis | None = None
-        self._lock = threading.Lock()
-
-    def _get_app(self) -> FaceAnalysis:
-        """
-        Inicializa el modelo InsightFace una sola vez (lazy loading).
-
-        Usa doble verificación con lock: FastAPI corre los endpoints síncronos en
-        un threadpool, así que dos requests concurrentes podrían cargar/descargar
-        el modelo a la vez. El lock garantiza una sola carga.
-        """
-        if self._app is None:
-            with self._lock:
-                if self._app is None:  # Re-chequeo dentro del lock
-                    logger.info("Cargando modelo InsightFace buffalo_l...")
-                    app = FaceAnalysis(
-                        name="buffalo_l",
-                        providers=["CPUExecutionProvider"],  # Cambia a CUDAExecutionProvider si tienes GPU
-                    )
-                    app.prepare(ctx_id=0, det_size=(640, 640))
-                    self._app = app  # Se asigna solo cuando ya está listo
-                    logger.info("Modelo InsightFace listo.")
-        return self._app
-
-    def precargar(self) -> None:
-        """Fuerza la carga del modelo (para llamarse al arrancar la app)."""
-        self._get_app()
-
-    # ── API pública ───────────────────────────────────────────────────────────
-
-    def leer_imagen(self, contenido: bytes) -> np.ndarray | None:
-        """
-        Decodifica los bytes de una imagen (JPEG/PNG/etc.) a un frame BGR de OpenCV.
-        Retorna None si los bytes están vacíos o no son una imagen válida.
-        """
-        if not contenido:
-            return None
-        arr = np.frombuffer(contenido, dtype=np.uint8)
-        frame = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-        return frame  # None si no se pudo decodificar
-
-    def detectar_y_extraer(self, frame: np.ndarray) -> dict | None:
-        """
-        Recibe un frame BGR de OpenCV.
-        Retorna el embedding y datos de la cara detectada, o None si no hay cara.
-
-        Returns:
-            {
-                "embedding":   list[float],  # 512 dims
-                "bbox":        list[int],    # [x1, y1, x2, y2]
-                "det_score":   float,        # confianza de detección
-                "spoof_score": float | None, # score anti-spoofing
-                "es_real":     bool,
-            }
-        """
-        app = self._get_app()
-        faces = app.get(frame)
-
-        if not faces:
-            logger.debug("No se detectó ningún rostro en el frame.")
-            return None
-
-        # Tomar la cara con mayor score de detección
-        cara = max(faces, key=lambda f: f.det_score)
-
-        embedding = cara.normed_embedding.tolist()  # Ya normalizado L2 por InsightFace
-
-        # Anti-spoofing — solo si el modelo lo soporta.
-        # buffalo_l NO trae modelo anti-spoofing: el atributo existe pero es None,
-        # así que hay que comprobar el valor, no solo que el atributo exista.
-        spoof_score = None
-        es_real = True
-        raw_spoof = getattr(cara, "spoofing_score", None)
-        if raw_spoof is not None:
-            spoof_score = float(raw_spoof)
-            es_real = spoof_score > SPOOFING_UMBRAL
-
-        # Landmarks (5 puntos: ojos, nariz, comisuras) — para el liveness multi-frame.
-        kps = cara.kps.tolist() if getattr(cara, "kps", None) is not None else None
-
-        return {
-            "embedding":   embedding,
-            "bbox":        cara.bbox.astype(int).tolist(),
-            "kps":         kps,
-            "det_score":   float(cara.det_score),
-            "spoof_score": spoof_score,
-            "es_real":     es_real,
-        }
-
-    def buscar_en_bd(
-        self,
-        embedding: list[float],
-        db: Session,
-        id_empresa: int | None = None,
-        id_area: int | None = None,
-    ) -> dict | None:
-        """
-        Busca el embedding más cercano en la BD usando similitud coseno con pgvector.
-
-        Args:
-            id_empresa: si se indica, limita la búsqueda a trabajadores de esa empresa.
-            id_area:    si se indica, limita la búsqueda a trabajadores de esa área.
-            (El scanner los deriva de la puerta para no buscar fuera de su empresa.)
-
-        Returns:
-            { "trabajador": Trabajador, "similitud": float } o None si no hay match.
-        """
-        vector_str = "[" + ",".join(str(x) for x in embedding) + "]"
-
-        resultado = db.execute(
-            text("""
-                SELECT
-                    t.id_trabajador,
-                    t.nombre,
-                    t.apellido,
-                    t.estado,
-                    1 - (e.vector_embedding <=> CAST(:vector AS vector)) AS similitud
-                FROM embeddings e
-                JOIN trabajadores t ON t.id_trabajador = e.id_trabajador
-                WHERE e.estado = 'activo'
-                  AND t.estado  = 'activo'
-                  AND (:id_empresa IS NULL OR t.id_empresa = :id_empresa)
-                  AND (:id_area    IS NULL OR t.id_area    = :id_area)
-                ORDER BY e.vector_embedding <=> CAST(:vector AS vector)
-                LIMIT 1
-            """),
-            {"vector": vector_str, "id_empresa": id_empresa, "id_area": id_area},
-        ).fetchone()
-
-        if resultado is None:
-            return None
-
-        similitud = float(resultado.similitud)
-        logger.debug(f"Mejor match: id={resultado.id_trabajador} similitud={similitud:.4f}")
-
-        if similitud < SIMILITUD_UMBRAL:
-            return None
-
-        trabajador = db.query(Trabajador).get(resultado.id_trabajador)
-        return {"trabajador": trabajador, "similitud": similitud}
-
-    def asegurar_no_spoof(self, frame: np.ndarray, cara: dict) -> None:
-        """
-        Anti-spoofing para el flujo de REGISTRO/enrolamiento: lanza 422 si la cara
-        es un ataque de presentación (foto, pantalla, papel/dibujo). Si el
-        anti-spoofing está desactivado o no disponible, no bloquea (igual que el
-        scanner). Comparte el mismo modelo y umbral que el acceso.
-        """
-        if not settings.ANTISPOOFING_ACTIVO:
-            return
-
-        resultado = antispoof_service.evaluar(frame, cara["bbox"])
-        if resultado is None:
-            logger.warning(
-                "ANTISPOOFING_ACTIVO=True pero el modelo no está disponible; se omite el check en registro."
-            )
-            return
-
-        if not resultado["es_real"]:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail=(
-                    f"Anti-spoofing: posible foto, pantalla o papel "
-                    f"(score real={resultado['score_real']:.2f}). Usa tu cara real."
-                ),
-            )
-
-    def _verificar_antispoof(self, frame: np.ndarray, cara: dict) -> ScanResponse | None:
-        """
-        Corre el modelo anti-spoof dedicado (foto/pantalla/hoja) si está activo.
-        Retorna un ScanResponse de rechazo si detecta un ataque, o None si pasa
-        (o si el anti-spoofing está desactivado / no disponible → no bloquea).
-        """
-        if not settings.ANTISPOOFING_ACTIVO:
-            return None
-
-        resultado = antispoof_service.evaluar(frame, cara["bbox"])
-        if resultado is None:
-            logger.warning(
-                "ANTISPOOFING_ACTIVO=True pero el modelo no está disponible; se omite el check."
-            )
-            return None
-
-        if not resultado["es_real"]:
-            return ScanResponse(
-                acceso=False,
-                mensaje=f"Anti-spoofing: posible foto o pantalla "
-                        f"(score real={resultado['score_real']:.2f}).",
-                trabajador=None,
-                id_escaneo=None,
-                estado_registro="rechazado",
-            )
-        return None
-
+    # ── Destino / ubicación (dominio access) ───────────────────────────────────
     def _resolver_ubicacion(
         self,
         latitud: float | None,
@@ -283,35 +69,28 @@ class FacialService:
         if punto is not None:
             return punto
 
-        puerta = db.query(PuertaAcceso).get(id_puerta)
+        puerta = tenancy_service.obtener_puerta(id_puerta, db)
         return puerta.ubicacion if puerta else None
-
-    def _empresa_de_puerta(self, id_puerta: int, db: Session) -> int | None:
-        """
-        Devuelve el id_empresa de la puerta para acotar la búsqueda facial a esa
-        empresa. Si la puerta no tiene empresa asignada, retorna None (no acota →
-        busca en todas, comportamiento anterior).
-        """
-        puerta = db.query(PuertaAcceso).get(id_puerta)
-        return puerta.id_empresa if puerta else None
 
     def _validar_destino(self, id_puerta: int, id_dispositivo: int | None, db: Session) -> None:
         """
         Valida (antes de reconocer) que la puerta exista y, si se indicó, también
         el dispositivo. Lanza 404 con un mensaje claro en lugar de dejar que el
-        INSERT del escaneo falle con un 500 por violación de FK.
+        INSERT del escaneo falle con un 500 por violación de FK. Lee tenancy a
+        través de su facade (access no consulta los modelos de tenancy directo).
         """
-        if db.query(PuertaAcceso).get(id_puerta) is None:
+        if tenancy_service.obtener_puerta(id_puerta, db) is None:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Puerta {id_puerta} no encontrada.",
             )
-        if id_dispositivo is not None and db.query(Dispositivo).get(id_dispositivo) is None:
+        if id_dispositivo is not None and tenancy_service.obtener_dispositivo(id_dispositivo, db) is None:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Dispositivo {id_dispositivo} no encontrado.",
             )
 
+    # ── Registro y validación del escaneo ──────────────────────────────────────
     def _registrar_escaneo(self, escaneo: Escaneo, db: Session) -> Escaneo:
         """
         Persiste el escaneo capturando errores de integridad (FK, etc.) y
@@ -332,26 +111,36 @@ class FacialService:
 
     def _validar_escaneo_online(self, escaneo: Escaneo, db: Session) -> None:
         """
-        Valida el escaneo recién insertado llamando a validar_escaneos_lote() de la
-        BD (reemplaza al viejo trigger AFTER INSERT, eliminado en el esquema nuevo).
+        Valida el escaneo recién insertado y consolida la asistencia del día:
 
-        La función evalúa las 3 capas (tipo_puerta vs permiso, empresa, geocerca);
-        si alguna falla, marca el escaneo (rechazado/fuera_de_area) y crea la
-        incidencia correspondiente. Se acota con p_desde = sincronizado_en del
-        propio escaneo para no reprocesar toda la bitácora (idempotente: la función
-        solo toca escaneos aún en estado 'exitoso').
+          1. validar_escaneos_lote(): evalúa las 3 capas (tipo_puerta vs permiso,
+             empresa, geocerca). Si alguna falla, marca el escaneo
+             (rechazado/fuera_de_area) y crea la incidencia. Acotado con
+             p_desde = sincronizado_en del propio escaneo (idempotente: solo toca
+             escaneos aún en estado 'exitoso'), para no reprocesar la bitácora.
+          2. consolidar_asistencia_dia(0, <trab>, FALSE): materializa la ENTRADA
+             del día en 'asistencia' EN VIVO (acotada a este trabajador, sin salida
+             —la salida se infiere en el cierre nocturno—). Si el escaneo quedó
+             rechazado en el paso 1, la consolidación lo ignora (solo cuenta los
+             'exitoso'/'manual'), así que no genera una entrada inválida.
+
+        Ambas corren en la misma transacción; si algo falla no se rompe el acceso.
         """
         try:
             db.execute(
                 text("SELECT * FROM validar_escaneos_lote(:desde)"),
                 {"desde": escaneo.sincronizado_en},
             )
+            db.execute(
+                text("SELECT * FROM consolidar_asistencia_dia(0, :trab, FALSE)"),
+                {"trab": escaneo.id_trabajador},
+            )
             db.commit()
             db.refresh(escaneo)
         except Exception as exc:  # no romper el acceso si la validación falla
             db.rollback()
             logger.error(
-                "No se pudo validar en lote el escaneo %s: %s",
+                "No se pudo validar/consolidar el escaneo %s: %s",
                 escaneo.id_escaneo, exc,
             )
 
@@ -374,12 +163,12 @@ class FacialService:
         if not incidencias:
             return
 
-        jpeg = self._recorte_jpeg(frame, cara)
+        jpeg = recognition_service.recorte_jpeg(frame, cara)
         if jpeg is None:
             logger.warning("No se pudo codificar la foto de la incidencia del escaneo %s.", escaneo.id_escaneo)
             return
 
-        ruta_web = self._escribir_media(jpeg, "incidencias", f"escaneo_{escaneo.id_escaneo}.jpg")
+        ruta_web = media_service.guardar_bytes(jpeg, "incidencias", f"escaneo_{escaneo.id_escaneo}.jpg")
         if ruta_web is None:
             return
         for inc in incidencias:
@@ -387,64 +176,7 @@ class FacialService:
         db.commit()
         logger.info("Foto de incidencia guardada para el escaneo %s -> %s", escaneo.id_escaneo, ruta_web)
 
-    # ── Captura de intentos de acceso (spoofing / otra empresa / desconocido) ──
-    def _recorte_jpeg(self, frame: np.ndarray, cara: dict) -> bytes | None:
-        """Recorta el rostro (clamp a los límites del frame) y lo codifica a JPEG."""
-        h, w = frame.shape[:2]
-        x1, y1, x2, y2 = cara["bbox"]
-        x1, y1 = max(0, int(x1)), max(0, int(y1))
-        x2, y2 = min(w, int(x2)), min(h, int(y2))
-        recorte = frame[y1:y2, x1:x2]
-        if recorte.size == 0:
-            recorte = frame  # fallback: frame completo si el bbox quedó vacío
-        ok, buf = cv2.imencode(".jpg", recorte, [cv2.IMWRITE_JPEG_QUALITY, 85])
-        return buf.tobytes() if ok else None
-
-    def _escribir_media(self, jpeg: bytes, subcarpeta: str, nombre: str) -> str | None:
-        """Guarda los bytes JPEG en media/<subcarpeta>/<nombre> y devuelve la URL web."""
-        carpeta = os.path.join(_MEDIA_BASE, subcarpeta)
-        os.makedirs(carpeta, exist_ok=True)
-        try:
-            with open(os.path.join(carpeta, nombre), "wb") as f:
-                f.write(jpeg)
-        except OSError as exc:
-            logger.error("No se pudo guardar la imagen en %s/%s: %s", subcarpeta, nombre, exc)
-            return None
-        return f"{settings.MEDIA_URL}/{subcarpeta}/{nombre}"
-
-    def _mejor_candidato_global(self, embedding: list[float], db: Session) -> dict | None:
-        """
-        Busca el rostro más parecido en TODA la BD (sin filtrar por empresa) y SIN
-        aplicar el umbral de match. Sirve para clasificar un acceso no reconocido
-        en la empresa de la puerta.
-
-        Returns:
-            {"id_trabajador": int, "id_empresa": int, "similitud": float} o None.
-        """
-        vector_str = "[" + ",".join(str(x) for x in embedding) + "]"
-        row = db.execute(
-            text("""
-                SELECT
-                    t.id_trabajador,
-                    t.id_empresa,
-                    1 - (e.vector_embedding <=> CAST(:vector AS vector)) AS similitud
-                FROM embeddings e
-                JOIN trabajadores t ON t.id_trabajador = e.id_trabajador
-                WHERE e.estado = 'activo'
-                  AND t.estado  = 'activo'
-                ORDER BY e.vector_embedding <=> CAST(:vector AS vector)
-                LIMIT 1
-            """),
-            {"vector": vector_str},
-        ).fetchone()
-        if row is None:
-            return None
-        return {
-            "id_trabajador": row.id_trabajador,
-            "id_empresa": row.id_empresa,
-            "similitud": float(row.similitud),
-        }
-
+    # ── Intentos rechazados (spoofing / otra empresa / desconocido) ────────────
     def _guardar_intento(
         self,
         tipo: str,
@@ -462,7 +194,7 @@ class FacialService:
         """
         intento = IntentoAcceso(
             id_puerta=id_puerta,
-            id_empresa=self._empresa_de_puerta(id_puerta, db),
+            id_empresa=tenancy_service.empresa_de_puerta(id_puerta, db),
             tipo=tipo,
             id_trabajador=id_trabajador,
             similitud=round(similitud, 3) if similitud is not None else None,
@@ -477,9 +209,9 @@ class FacialService:
             return None
 
         # Guardar la foto y enlazarla (nombrada por el id del intento)
-        jpeg = self._recorte_jpeg(frame, cara)
+        jpeg = recognition_service.recorte_jpeg(frame, cara)
         if jpeg is not None:
-            ruta = self._escribir_media(jpeg, "intentos", f"intento_{intento.id_intento}.jpg")
+            ruta = media_service.guardar_bytes(jpeg, "intentos", f"intento_{intento.id_intento}.jpg")
             if ruta is not None:
                 intento.ruta_foto = ruta
                 db.commit()
@@ -508,7 +240,7 @@ class FacialService:
         es ruido y no se registra.
         """
         det = float(cara.get("det_score", 0.0))
-        cand = self._mejor_candidato_global(cara["embedding"], db)
+        cand = recognition_service.mejor_candidato_global(cara["embedding"], db)
         sim = cand["similitud"] if cand else None
 
         if cand is not None and sim >= SIMILITUD_UMBRAL and cand["id_empresa"] != id_empresa_puerta:
@@ -565,9 +297,9 @@ class FacialService:
             return
 
         # Guardar la foto y enlazarla a la incidencia
-        jpeg = self._recorte_jpeg(frame, cara)
+        jpeg = recognition_service.recorte_jpeg(frame, cara)
         if jpeg is not None:
-            ruta = self._escribir_media(jpeg, "incidencias", f"incidencia_{incidencia.id_incidencia}.jpg")
+            ruta = media_service.guardar_bytes(jpeg, "incidencias", f"incidencia_{incidencia.id_incidencia}.jpg")
             if ruta is not None:
                 incidencia.ruta_foto = ruta
                 db.commit()
@@ -577,6 +309,7 @@ class FacialService:
             incidencia.id_incidencia, cand["id_trabajador"], id_puerta, cand["similitud"],
         )
 
+    # ── Pipelines de acceso ─────────────────────────────────────────────────────
     def procesar_frame_acceso(
         self,
         frame: np.ndarray,
@@ -593,8 +326,8 @@ class FacialService:
         # 0. Validar destino (puerta/dispositivo) antes de gastar en reconocimiento
         self._validar_destino(id_puerta, id_dispositivo, db)
 
-        # 1. Detectar rostro y extraer embedding
-        cara = self.detectar_y_extraer(frame)
+        # 1. Detectar rostro y extraer embedding (motor de reconocimiento)
+        cara = recognition_service.detectar_y_extraer(frame)
         if cara is None:
             return ScanResponse(
                 acceso=False,
@@ -605,14 +338,21 @@ class FacialService:
             )
 
         # 2. Anti-spoofing dedicado (foto/pantalla/hoja)
-        rechazo = self._verificar_antispoof(frame, cara)
-        if rechazo is not None:
+        anti = recognition_service.evaluar_antispoof(frame, cara)
+        if anti is not None and not anti["es_real"]:
             self._guardar_intento("spoofing", frame, cara, id_puerta, db)
-            return rechazo
+            return ScanResponse(
+                acceso=False,
+                mensaje=f"Anti-spoofing: posible foto o pantalla "
+                        f"(score real={anti['score_real']:.2f}).",
+                trabajador=None,
+                id_escaneo=None,
+                estado_registro="rechazado",
+            )
 
         # 3. Buscar en BD (acotado a la empresa de la puerta)
-        id_empresa = self._empresa_de_puerta(id_puerta, db)
-        match = self.buscar_en_bd(cara["embedding"], db, id_empresa=id_empresa)
+        id_empresa = tenancy_service.empresa_de_puerta(id_puerta, db)
+        match = recognition_service.buscar_en_bd(cara["embedding"], db, id_empresa=id_empresa)
         if match is None:
             # No reconocido en esta empresa → clasificar (otra empresa / desconocido)
             self._clasificar_no_match(frame, cara, id_puerta, id_empresa, db)
@@ -655,56 +395,6 @@ class FacialService:
             estado_registro="exitoso",
         )
 
-    # ── Liveness multi-frame (modo permisivo) ─────────────────────────────────
-
-    def evaluar_liveness(self, caras: list[dict]) -> dict:
-        """
-        Liveness pasivo a partir de varios frames ya procesados con detectar_y_extraer.
-
-        Valida dos cosas (modo permisivo):
-          1. Misma persona: los embeddings de los frames son consistentes.
-          2. Movimiento: los landmarks se desplazan entre frames (una foto
-             estática repetida no se mueve → se rechaza).
-
-        Returns:
-            { "vivo": bool, "motivo": str, "movimiento": float, "similitud_min": float }
-        """
-        # 1. Misma persona — similitud coseno mínima entre embeddings (ya normalizados L2)
-        embs = [np.array(c["embedding"], dtype=np.float32) for c in caras]
-        sim_min = 1.0
-        for i in range(len(embs)):
-            for j in range(i + 1, len(embs)):
-                sim_min = min(sim_min, float(np.dot(embs[i], embs[j])))
-
-        if sim_min < LIVENESS_MISMA_PERSONA_UMBRAL:
-            return {
-                "vivo": False,
-                "motivo": f"Los frames parecen de personas distintas (similitud={sim_min:.2f}).",
-                "movimiento": 0.0,
-                "similitud_min": sim_min,
-            }
-
-        # 2. Movimiento — desplazamiento promedio de landmarks entre frames
-        #    consecutivos, normalizado por el ancho de la cara.
-        caras_con_kps = [c for c in caras if c.get("kps")]
-        movimientos = []
-        for a, b in zip(caras_con_kps, caras_con_kps[1:]):
-            kps_a = np.array(a["kps"], dtype=np.float32)
-            kps_b = np.array(b["kps"], dtype=np.float32)
-            ancho = max(((a["bbox"][2] - a["bbox"][0]) + (b["bbox"][2] - b["bbox"][0])) / 2.0, 1.0)
-            movimientos.append(float(np.linalg.norm(kps_a - kps_b, axis=1).mean()) / ancho)
-
-        movimiento = max(movimientos) if movimientos else 0.0
-        if movimiento < LIVENESS_MOVIMIENTO_MIN:
-            return {
-                "vivo": False,
-                "motivo": f"Sin movimiento entre frames (posible foto estática, mov={movimiento:.4f}).",
-                "movimiento": movimiento,
-                "similitud_min": sim_min,
-            }
-
-        return {"vivo": True, "motivo": "Liveness OK.", "movimiento": movimiento, "similitud_min": sim_min}
-
     def procesar_frames_acceso(
         self,
         frames: list[np.ndarray],
@@ -724,7 +414,7 @@ class FacialService:
         self._validar_destino(id_puerta, id_dispositivo, db)
 
         # 1. Detectar rostro en cada frame (conservando el frame de origen)
-        pares = [(f, self.detectar_y_extraer(f)) for f in frames]
+        pares = [(f, recognition_service.detectar_y_extraer(f)) for f in frames]
         pares = [(f, c) for f, c in pares if c is not None]
         caras = [c for _, c in pares]
 
@@ -740,7 +430,7 @@ class FacialService:
             )
 
         # 2. Validar liveness
-        live = self.evaluar_liveness(caras)
+        live = recognition_service.evaluar_liveness(caras)
         if not live["vivo"]:
             return ScanResponse(
                 acceso=False,
@@ -752,14 +442,21 @@ class FacialService:
 
         # 3. Anti-spoofing dedicado sobre el frame de mejor calidad
         mejor_frame, mejor = max(pares, key=lambda p: p[1]["det_score"])
-        rechazo = self._verificar_antispoof(mejor_frame, mejor)
-        if rechazo is not None:
+        anti = recognition_service.evaluar_antispoof(mejor_frame, mejor)
+        if anti is not None and not anti["es_real"]:
             self._guardar_intento("spoofing", mejor_frame, mejor, id_puerta, db)
-            return rechazo
+            return ScanResponse(
+                acceso=False,
+                mensaje=f"Anti-spoofing: posible foto o pantalla "
+                        f"(score real={anti['score_real']:.2f}).",
+                trabajador=None,
+                id_escaneo=None,
+                estado_registro="rechazado",
+            )
 
         # 4. Reconocer usando ese frame (acotado a la empresa de la puerta)
-        id_empresa = self._empresa_de_puerta(id_puerta, db)
-        match = self.buscar_en_bd(mejor["embedding"], db, id_empresa=id_empresa)
+        id_empresa = tenancy_service.empresa_de_puerta(id_puerta, db)
+        match = recognition_service.buscar_en_bd(mejor["embedding"], db, id_empresa=id_empresa)
         if match is None:
             # No reconocido en esta empresa → clasificar (otra empresa / desconocido)
             self._clasificar_no_match(mejor_frame, mejor, id_puerta, id_empresa, db)
@@ -774,7 +471,7 @@ class FacialService:
         trabajador = match["trabajador"]
         similitud  = match["similitud"]
 
-        # 4. Registrar escaneo (con ubicación: GPS del dispositivo o, si no, la de la puerta)
+        # 5. Registrar escaneo (con ubicación: GPS del dispositivo o, si no, la de la puerta)
         escaneo = Escaneo(
             id_trabajador=trabajador.id_trabajador,
             id_puerta=id_puerta,
@@ -802,59 +499,5 @@ class FacialService:
             estado_registro="exitoso",
         )
 
-    def capturar_desde_camara(self, camara_id: int = 0) -> np.ndarray | None:
-        """
-        Abre la cámara, espera a detectar un rostro y retorna el frame.
-        Uso temporal para pruebas desde el backend.
-        """
-        cap = cv2.VideoCapture(camara_id)
-        if not cap.isOpened():
-            logger.error(f"No se pudo abrir la cámara {camara_id}.")
-            return None
 
-        app = self._get_app()
-        frame_capturado = None
-
-        logger.info("Cámara abierta. Esperando rostro...")
-
-        try:
-            while True:
-                ret, frame = cap.read()
-                if not ret:
-                    break
-
-                faces = app.get(frame)
-
-                # Dibujar bounding boxes en tiempo real
-                for face in faces:
-                    bbox = face.bbox.astype(int)
-                    color = (0, 255, 0) if face.det_score > 0.7 else (0, 165, 255)
-                    cv2.rectangle(frame, (bbox[0], bbox[1]), (bbox[2], bbox[3]), color, 2)
-                    cv2.putText(
-                        frame,
-                        f"{face.det_score:.2f}",
-                        (bbox[0], bbox[1] - 8),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.6,
-                        color,
-                        2,
-                    )
-
-                cv2.imshow("FE Scanner — Presiona ESPACIO para capturar, ESC para salir", frame)
-
-                key = cv2.waitKey(1) & 0xFF
-                if key == 27:  # ESC — cancelar
-                    break
-                if key == 32 and faces:  # ESPACIO — capturar si hay cara
-                    frame_capturado = frame.copy()
-                    logger.info("Frame capturado.")
-                    break
-
-        finally:
-            cap.release()
-            cv2.destroyAllWindows()
-
-        return frame_capturado
-
-
-facial_service = FacialService()
+scanner_service = ScannerService()
