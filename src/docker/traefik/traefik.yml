@@ -1,0 +1,56 @@
+# Traefik v3 — configuración ESTÁTICA (API Gateway de SL_ASISTENCIAS).
+# Único punto de entrada del sistema. Descubre los microservicios por labels de
+# Docker (no hay que editar un archivo central por cada servicio nuevo) y
+# centraliza rate-limit, headers de seguridad y —opcional— TLS y validación JWT.
+
+global:
+  checkNewVersion: false
+  sendAnonymousUsage: false
+
+# ── Puntos de entrada ─────────────────────────────────────────────────────────
+entryPoints:
+  web:
+    address: ":80"
+    # Cuando tengas dominio + TLS, fuerza HTTPS descomentando:
+    # http:
+    #   redirections:
+    #     entryPoint:
+    #       to: websecure
+    #       scheme: https
+  websecure:
+    address: ":443"
+
+# ── Dashboard (se publica SOLO en localhost vía el binding 127.0.0.1:8080) ─────
+api:
+  dashboard: true
+  insecure: true
+
+# ── Proveedores ───────────────────────────────────────────────────────────────
+providers:
+  # Descubrimiento por labels en los contenedores.
+  docker:
+    # Apunta al mini-proxy (no al socket): él reescribe la versión de la API de
+    # Docker para que el Engine 29 no rechace al cliente viejo de Traefik.
+    endpoint: "tcp://dockerproxy:2375"
+    exposedByDefault: false # solo enruta servicios con traefik.enable=true
+    # Con una sola red (la default del compose) Traefik la detecta solo.
+    # Si algún día agregas varias redes, fija aquí: network: sl_asistencias_default
+  # Middlewares compartidos (rate-limit, headers, forward-auth opcional).
+  file:
+    filename: /etc/traefik/dynamic.yml
+    watch: true
+
+# ── TLS automático (Let's Encrypt) ────────────────────────────────────────────
+# Requiere dominio público + puerto 80 abierto. Al activarlo, en cada router usa
+# una regla con Host(`tu.dominio`) y añade la label tls.certresolver=le.
+# certificatesResolvers:
+#   le:
+#     acme:
+#       email: tu-correo@dominio.com
+#       storage: /letsencrypt/acme.json
+#       httpChallenge:
+#         entryPoint: web
+
+log:
+  level: DEBUG
+accessLog: {}

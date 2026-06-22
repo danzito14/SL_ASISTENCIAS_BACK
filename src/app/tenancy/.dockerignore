@@ -1,0 +1,32 @@
+# Entornos virtuales (pesados; se reinstala dentro de la imagen)
+.venv/
+venv/
+env/
+ENV/
+
+# Caches de Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Secretos: NO copiar al contenedor (se pasan por variables de entorno en compose)
+.env
+.env.*
+!.env.example
+
+# IDE / editor
+.idea/
+.vscode/
+
+# Logs / temporales / tests
+*.log
+*.tmp
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Git
+.git/
+.gitignore

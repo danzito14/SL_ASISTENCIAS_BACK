@@ -11,20 +11,14 @@ from src.core.config import settings
 from src.core.pgdb import engine
 from src.core.auth import guard_scopes, oauth2_scheme
 import src.models  # noqa: F401 — registra todos los modelos en el registry de Base
-from src.routers.Rol_Router import router as Router_Rol
-from src.routers.Usuario_Router import router as Router_Usuario
-from src.routers.Empresa_Router import router as Router_Empresa
-from src.routers.AreaTrabajo_Router import router as Router_AreaTrabajo
-from src.routers.PuertaAcceso_Router import router as Router_PuertaAcceso
-from src.routers.Trabajadores_Router import router as Router_Trabajador
+# Servidos por OTROS microservicios: /usuarios /roles -> identity ; /empresas
+# /areas /puertas /dispositivos -> tenancy ; /trabajadores /embeddings -> workers ;
+# /reportes -> reports. Este servicio (access) registra la asistencia y los accesos.
 from src.routers.Asistencia_Router import router as Router_Asistencia
 from src.routers.Escaneo_Router import router as Router_Escaneo
 from src.routers.Scanner_Router import router as Router_Scanner
-from src.routers.Dispositivo_Router import router as Router_Dispositivo
 from src.routers.Incidencia_Router import router as Router_Incidencia
-from src.routers.Embedding_Router import router as Router_Embedding
 from src.routers.IntentoAcceso_Router import router as Router_IntentoAcceso
-from src.routers.Reporte_Router import router as Router_Reporte
 
 logging.basicConfig(
     level=logging.DEBUG if settings.DEBUG else logging.INFO,
@@ -47,15 +41,7 @@ async def lifespan(app: FastAPI):
             f"{settings.DB_HOST}:{settings.DB_PORT}/{settings.DB_NAME}."
         ) from exc
 
-    # ── Precargar el modelo facial (opcional) ─────────────────────────────────
-    # Descarga/carga buffalo_l una sola vez al arrancar en lugar de en el primer
-    # request. Apagado por defecto para que los reloads de desarrollo sean rápidos.
-    # Actívalo en producción con PRELOAD_FACE_MODEL=true en el .env.
-    if getattr(settings, "PRELOAD_FACE_MODEL", False):
-        from src.services.Recognition_Service import recognition_service
-        logger.info("Precargando modelo facial...")
-        recognition_service.precargar()
-
+    # El modelo facial vive en el microservicio 'recognition' (se precarga allá).
     yield
 
 
@@ -92,20 +78,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.include_router(Router_Rol)
-app.include_router(Router_Usuario)
-app.include_router(Router_Empresa)
-app.include_router(Router_AreaTrabajo)
-app.include_router(Router_PuertaAcceso)
-app.include_router(Router_Trabajador)
 app.include_router(Router_Asistencia)
 app.include_router(Router_Escaneo)
 app.include_router(Router_Scanner)
-app.include_router(Router_Dispositivo)
 app.include_router(Router_Incidencia)
-app.include_router(Router_Embedding)
 app.include_router(Router_IntentoAcceso)
-app.include_router(Router_Reporte)
 
 
 @app.get("/health", tags=["Health"])

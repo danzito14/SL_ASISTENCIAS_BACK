@@ -1,60 +1,80 @@
 # app/services/media_service.py
 """
-Servicio de MEDIA: almacenamiento y resolución de rutas de las fotos protegidas
-(incidencias e intentos del scanner).
+Cliente del microservicio MEDIA (almacenamiento/servido de fotos protegidas).
 
-Concentra en UN solo lugar todo el acoplamiento a disco: es la "costura" para
-extraer 'media' como microservicio (object storage / URLs firmadas) sin tocar al
-resto del backend. No depende de cv2/numpy: recibe y entrega bytes. El recorte del
-rostro (que usa OpenCV) vive en el scanner (dominio recognition); aquí solo se
-persiste y se sirve.
+media es un servicio aparte, dueño del disco/object storage. Este cliente habla
+con él por HTTP interno (token compartido): guarda y recupera bytes. El backend
+sigue siendo el GUARDIÁN de auth+empresa de las fotos (sabe a qué incidencia/intento
+pertenece cada una); media solo almacena/sirve bytes y no tiene BD.
+
+(Antes esto era acceso a disco directo; ahora es la frontera con el servicio media.)
 """
 import logging
-import os
+
+import requests
 
 from src.core.config import settings
 
 logger = logging.getLogger(__name__)
 
+_TIMEOUT = 10  # segundos
+
 
 class MediaService:
 
-    def guardar_bytes(self, contenido: bytes, subcarpeta: str, nombre: str) -> str | None:
-        """
-        Guarda los bytes en media/<subcarpeta>/<nombre> y devuelve la URL web
-        (p. ej. '/media/incidencias/escaneo_<uuid>.jpg'), o None si falla la escritura.
-        """
-        carpeta = os.path.join(settings.media_base_dir, subcarpeta)
-        os.makedirs(carpeta, exist_ok=True)
-        try:
-            with open(os.path.join(carpeta, nombre), "wb") as f:
-                f.write(contenido)
-        except OSError as exc:
-            logger.error("No se pudo guardar la imagen en %s/%s: %s", subcarpeta, nombre, exc)
-            return None
-        return f"{settings.MEDIA_URL}/{subcarpeta}/{nombre}"
+    def _headers(self) -> dict:
+        return {"X-Internal-Token": settings.MEDIA_INTERNAL_TOKEN}
 
-    def ruta_archivo(self, ruta_foto: str | None) -> str | None:
-        """
-        Mapea una URL web de foto ('/media/<sub>/<archivo>') a su ruta ABSOLUTA en
-        disco, con defensa anti path-traversal. Devuelve None si no hay foto, si la
-        ruta se sale de la carpeta media, o si el archivo no existe.
-        """
-        if not ruta_foto:
-            return None
-
+    def _sub_nombre(self, ruta_foto: str) -> tuple[str, str] | None:
+        """De '/media/incidencias/x.jpg' -> ('incidencias', 'x.jpg'); None si no encaja."""
         rel = ruta_foto
         if rel.startswith(settings.MEDIA_URL):
             rel = rel[len(settings.MEDIA_URL):]
         rel = rel.lstrip("/\\")
-
-        base = os.path.normpath(settings.media_base_dir)
-        ruta = os.path.normpath(os.path.join(base, rel))
-        # La ruta resuelta debe quedar DENTRO de la carpeta media.
-        if not ruta.startswith(base):
-            logger.warning("Ruta de foto fuera de media (posible traversal): %s", ruta_foto)
+        partes = rel.split("/", 1)
+        if len(partes) != 2 or not partes[0] or not partes[1]:
             return None
-        return ruta if os.path.isfile(ruta) else None
+        return partes[0], partes[1]
+
+    def guardar_bytes(self, contenido: bytes, subcarpeta: str, nombre: str) -> str | None:
+        """
+        Sube los bytes al servicio media y devuelve la URL web a guardar en la BD
+        (p. ej. '/media/incidencias/escaneo_<uuid>.jpg'), o None si falla.
+        """
+        url = f"{settings.MEDIA_SERVICE_URL}/archivos/{subcarpeta}/{nombre}"
+        try:
+            r = requests.put(
+                url, data=contenido,
+                headers={**self._headers(), "Content-Type": "image/jpeg"},
+                timeout=_TIMEOUT,
+            )
+            r.raise_for_status()
+            return r.json().get("ruta")
+        except requests.RequestException as exc:
+            logger.error("media: no se pudo guardar %s/%s: %s", subcarpeta, nombre, exc)
+            return None
+
+    def obtener_bytes(self, ruta_foto: str | None) -> bytes | None:
+        """
+        Recupera los bytes de una foto por su ruta web (la que está en la BD).
+        None si no hay foto, la ruta no encaja, o media responde 404.
+        """
+        if not ruta_foto:
+            return None
+        sn = self._sub_nombre(ruta_foto)
+        if sn is None:
+            logger.warning("media: ruta_foto con formato inesperado: %s", ruta_foto)
+            return None
+        url = f"{settings.MEDIA_SERVICE_URL}/archivos/{sn[0]}/{sn[1]}"
+        try:
+            r = requests.get(url, headers=self._headers(), timeout=_TIMEOUT)
+            if r.status_code == 404:
+                return None
+            r.raise_for_status()
+            return r.content
+        except requests.RequestException as exc:
+            logger.error("media: no se pudo obtener %s: %s", ruta_foto, exc)
+            return None
 
 
 media_service = MediaService()

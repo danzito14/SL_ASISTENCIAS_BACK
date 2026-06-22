@@ -182,6 +182,47 @@ las funciones custom; cascadas en `SECURITY DEFINER`.
 - [x] Decoupling workers↔tenancy: facade `Tenancy_Service` (lecturas que otros dominios necesitan de tenancy). Workers consume el facade para validar área/derivar empresa; `Embedding_Service` ya no toca tenancy (usa `trabajadores.id_empresa` denormalizado). Falta: el facade pasa a cliente HTTP al separar BD; tenancy expondrá también puerta/dispositivo para access (#5).
 - [x] Cerrar el seam access→tenancy del scanner: lee puerta/dispositivo (empresa, existencia, ubicación) por `Tenancy_Service`, ya no por los modelos de tenancy. Falta para extraer `access`: geocerca en app (point-in-polygon con polígonos de tenancy en vez de `ST_Covers` en la BD), cascada por eventos, y el enriquecimiento de nombres de `Asistencia` (hoy `joinedload` a tenancy/puerta).
 - [x] Reports: los filtros por empresa usan el `id_empresa` denormalizado (asistencia/incidencias/trabajadores), quitando joins a tenancy innecesarios. `reports` sigue siendo agregador **read-only**; su extracción real = leer de **réplicas/vistas materializadas** (decisión de infra, no un seam de código).
+
+### Extracción real — en progreso
+- [x] **identity (1er microservicio extraído):** FastAPI independiente en `src/app/identity/` (imagen ligera, sin visión/IA). Es el único que **emite JWT** y posee login + `/usuarios` + `/roles`; se conecta como **`svc_identity`** (mínimo privilegio). El monolito quitó esos routers y ahora **autoriza stateless** desde los claims del JWT (`core/auth.Principal`). Compose (servicio `identity` en 8001) y Nginx (`/usuarios`,`/roles` → 8001) listos. **Verificado end-to-end** contra la BD viva: identity emite el token y el monolito lo valida sin tocar la BD. Falta para DB-per-service: BD propia de identity + `usuarios.empresa` como referencia lógica (validada por evento/llamada a tenancy).
+- [x] **media (2º microservicio extraído):** `src/app/media/` — servicio **mínimo (sin BD)** dueño del volumen `media_data`. Expone una API interna `PUT/GET /archivos/{sub}/{nombre}` con **token compartido** (no se expone en Nginx; solo red interna). El backend ya **no toca el disco**: `Media_Service` es un **cliente HTTP** (`guardar_bytes`=PUT, `obtener_bytes`=GET); los endpoints `/incidencias/{id}/foto` e `/intentos/{id}/foto` siguen sirviendo JPEG tras auth+empresa (**sin cambio para el front** — patrón gateway/proxy §7.6). **Verificado**: round-trip HTTP (guardar+recuperar), 404→None y token inválido→401. Falta: object storage (S3/MinIO) y/o URLs firmadas como optimización.
+- [x] **recognition (3er microservicio extraído):** `src/app/recognition/` — **motor facial compute-heavy** (InsightFace + anti-spoof + match pgvector). Conecta como **`svc_recognition`** (solo lectura de embeddings/trabajadores). API interna **coarse** con token: `/reconocer`, `/reconocer-liveness`, `/extraer`, `/identificar` → devuelve estado + match/candidato + el **recorte de cara en base64**. El backend pasó a **cliente HTTP** (`Recognition_Service`), borró el motor local y `antispoof_service`, y **soltó todo el stack de visión** (insightface/cv2/onnx) → imagen del backend mucho más liviana y arranque rápido. Enrolamiento (Trabajadores/Embedding) y scanner llaman a recognition; se quitaron los endpoints de **cámara del servidor** (no hay cámara en contenedores). Compose: servicio `recognition` pesado, **sin puertos** (réplicas para escalar). **Verificado**: backend libre de visión, compila/importa, compose válido (5 servicios), `svc_recognition` lee embeddings pero **no** usuarios. Pendiente: probar el flujo facial completo con `docker compose up --build` (descarga/carga el modelo). Falta para DB-per-service: que consuma embeddings por API de workers en vez de SQL directo.
+- [x] **tenancy (4º — parte 1 de "workers+tenancy"):** `src/app/tenancy/` — CRUD de **empresas/áreas/puertas/dispositivos**, conecta como **`svc_tenancy`**. Modelos recortados (sin relaciones a workers/access). El backend dejó de servir esos endpoints (Nginx → 8002) pero **mantiene su read-facade `Tenancy_Service` EN PROCESO** (lee las tablas compartidas con sus grants — el facade→cliente HTTP se difiere al split de BD) y conserva los modelos (para el enriquecimiento de `Asistencia`). **Verificado**: tenancy compila/importa/mappers, `svc_tenancy` lee empresas pero **no** usuarios; backend OK; compose **6 servicios**. Falta la **parte 2: workers** (trabajadores + embeddings).
+- [x] **workers (4º — parte 2):** `src/app/workers/` — CRUD de **trabajadores + embeddings**, conecta como **`svc_workers`**. Llama a **recognition** (cliente HTTP) para enrolar (`/extraer`) y mantiene su read-facade `Tenancy_Service` en proceso (valida el área con el grant SELECT sobre `area_trabajo`). Modelos recortados (Trabajador solo con su relación a Embedding; `AreaTrabajo` mínimo para el facade). El backend dejó de servir `/trabajadores` `/embeddings` (Nginx → 8003), conserva los modelos Trabajador/Embedding (para FKs + enriquecimiento de Asistencia). **Verificado**: workers compila/importa/mappers, `svc_workers` lee trabajadores/area_trabajo pero **no** usuarios; backend OK; **compose 7 servicios**. → El "backend" quedó reducido a **access + reports**.
+- [x] **reports (6º):** `src/app/reports/` — generación/exportación de reportes (asistencias, incidencias, retardos, faltas, fuera-de-área, intentos, trabajadores) en CSV/XLSX. **SOLO LECTURA**: conecta como **`svc_reports`** (SELECT a todo; idealmente a una réplica). Truco clave: **modelos mínimos SIN relaciones** (solo las columnas que consulta) → `configure_mappers` trivial, sin arrastrar el grafo de relaciones cross-domain. Imagen liviana (openpyxl; sin visión/geo). El backend dejó de servir `/reportes` (Nginx → 8004). **Verificado**: reports compila/importa/mappers, `svc_reports` lee asistencia/incidencias/intentos/trabajadores/áreas/empresas; backend OK; **compose 8 servicios**.
+
+### ✅ Extracción COMPLETA — el "backend" quedó como puro **access**
+
+| Servicio    | Puerto host    | Rol DB           | Sirve                                                        |
+|-------------|----------------|------------------|-------------------------------------------------------------|
+| identity    | 8001           | svc_identity     | `/usuarios` `/roles` (+ login/JWT)                          |
+| tenancy     | 8002           | svc_tenancy      | `/empresas` `/areas` `/puertas` `/dispositivos`            |
+| workers     | 8003           | svc_workers      | `/trabajadores` `/embeddings`                              |
+| reports     | 8004           | svc_reports      | `/reportes/*` (solo lectura)                               |
+| media       | interno        | — (sin BD)       | fotos protegidas (API interna con token)                   |
+| recognition | interno        | svc_recognition  | motor facial (API interna con token; réplicas para escalar)|
+| **backend** | 8000 (access)  | (rol a definir)  | `/asistencias` `/escaneos` `/incidencias` `/intentos` `/scanner` |
+
+**API Gateway:** **Traefik** (servicio `traefik` en compose) es el único punto de entrada
+(80/443). Enruta por **labels** (`exposedByDefault=false`; backend = catch-all `/`, el resto
+por prefijo; `media`/`recognition` con `enable=false`), centraliza `rate-limit`+`secure-headers` y la **validación de JWT** (ForwardAuth → identity
+`/validate`, **activo**: autentica una vez en el borde y los servicios solo autorizan por scope
+leyendo headers `X-*`; el `JWT_SECRET` quedó solo en identity). Deja listo (comentado) TLS
+Let's Encrypt. Los servicios **ya no publican puertos al host**; agregar uno nuevo es solo
+ponerle sus labels. Config en `src/docker/traefik/{traefik.yml,dynamic.yml}`; reemplaza al
+Nginx del host (`nginx/fe-scanner.conf`, ahora solo referencia). **Nota Docker Engine 29+:**
+Traefik no puede hablar directo con el socket (el Engine rechaza su versión de API vieja con
+400), así que se interpone un mini-proxy nginx (`dockerproxy`, `traefik/dockerproxy.conf`) que
+reescribe `/vX.YZ/`→`/v1.44/`; Traefik usa `endpoint: tcp://dockerproxy:2375`. **Stack probado
+en vivo** (10 contenedores): routing, ForwardAuth/JWT, 401 sin token y 200 con token válido.
+
+**Costuras que siguen EN PROCESO (a convertir en clientes HTTP al separar la BD por servicio):**
+- `Tenancy_Service` (facade de lectura de áreas/puertas/empresas) en **backend/access** y en **workers** → cliente HTTP de tenancy.
+- `Recognition_Service` y `Media_Service` ya son clientes HTTP (patrón a replicar).
+- `recognition` lee embeddings por SQL directo (svc_recognition) → consumir API de workers.
+- El **backend/access** aún corre con un rol amplio; falta crear/asignar **`svc_access`** (de `roles_microservicio.sql`) en su `.env`/compose.
+
+**Pendientes operativos antes de prod:** cambiar todas las contraseñas `CAMBIAR_*`; reasignar el job de `pg_cron` a `app_cron`; generar `JWT_SECRET` y los `*_INTERNAL_TOKEN`; probar el flujo facial completo con `docker compose up --build` (recognition descarga/carga el modelo).
 - [ ] Decidir transporte de eventos (cola/broker) para recognition→access y cascadas.
 - [x] Cerrar el gap de asistencia “entrada” → `consolidar_asistencia_dia` (vivo + offline + cron 3 AM).
 - [ ] Definir el contrato de sincronización offline y el descargador por área del escáner.

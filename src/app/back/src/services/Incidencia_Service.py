@@ -338,14 +338,13 @@ class IncidenciaService:
         )
         return fila[0] if fila else None
 
-    def ruta_archivo_foto(self, id_incidencia: UUID, db: Session) -> str | None:
+    def foto_bytes(self, id_incidencia: UUID, db: Session) -> bytes | None:
         """
-        Ruta ABSOLUTA en disco de la foto de la incidencia (o None si no tiene foto
-        o el archivo no existe). La resolución y la defensa anti path-traversal las
-        hace media_service. Lanza 404 si la incidencia no existe.
+        Bytes JPEG de la foto de la incidencia, recuperados del servicio media. None
+        si no tiene foto o media no la encuentra. Lanza 404 si la incidencia no existe.
         """
         incidencia = self.obtener_incidencia(id_incidencia, db)
-        return media_service.ruta_archivo(incidencia.ruta_foto)
+        return media_service.obtener_bytes(incidencia.ruta_foto)
 
 
 incidencia_service = IncidenciaService()

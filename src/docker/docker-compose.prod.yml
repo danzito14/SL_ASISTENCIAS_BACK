@@ -1,8 +1,10 @@
-# docker-compose.prod.yml — Backend + Postgres para el VPS.
+# docker-compose.prod.yml — Microservicios + Postgres para el VPS.
 #
-# Nginx va en el HOST (ver nginx/fe-scanner.conf) y hace de reverse proxy + HTTPS.
-# El backend solo escucha en 127.0.0.1:8000, así que únicamente Nginx lo alcanza
-# (no queda expuesto a internet). Postgres no publica puerto: solo la red interna.
+# El API Gateway es TRAEFIK (servicio 'traefik'): único punto de entrada (80/443),
+# descubre los servicios por labels y centraliza rate-limit/headers/TLS. Reemplaza
+# al Nginx del host (nginx/fe-scanner.conf queda solo como referencia histórica).
+# Los microservicios NO publican puertos al host: Traefik los alcanza por la red
+# interna de Docker. Postgres tampoco publica puerto: solo la red interna.
 #
 # Variables (POSTGRES_*, JWT_SECRET, CORS_ORIGINS) se leen del archivo .env que
 # esté JUNTO a este compose (pruebas/docker/.env). Ver env.example.
@@ -23,6 +25,39 @@
 name: sl_asistencias
 
 services:
+  # ── API Gateway (Traefik) ──────────────────────────────────────────────────
+  # Único punto de entrada (80/443). Descubre los microservicios por labels (no
+  # hay que editar un archivo central por cada servicio nuevo) y centraliza
+  # rate-limit, headers de seguridad y —opcional— TLS y validación de JWT.
+  # Reemplaza al Nginx del host. El dashboard queda SOLO en localhost (8080).
+  # Mini-proxy que reescribe la versión de la API de Docker (Engine 29 rechaza la
+  # que pide Traefik). Solo Traefik lo consume por la red interna; no expone puertos
+  # ni da a Traefik acceso directo al socket (lo tiene SOLO este proxy).
+  dockerproxy:
+    image: nginx:alpine
+    container_name: sl_dockerproxy
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./traefik/dockerproxy.conf:/etc/nginx/nginx.conf:ro
+
+  traefik:
+    image: traefik:v3.5
+    container_name: sl_traefik
+    restart: unless-stopped
+    depends_on:
+      - dockerproxy
+    command:
+      - "--configFile=/etc/traefik/traefik.yml"
+    ports:
+      - "80:80"
+      - "443:443"
+      - "127.0.0.1:8080:8080"   # dashboard, SOLO localhost
+    volumes:
+      - ./traefik/traefik.yml:/etc/traefik/traefik.yml:ro
+      - ./traefik/dynamic.yml:/etc/traefik/dynamic.yml:ro
+      - traefik_letsencrypt:/letsencrypt
+
   postgres:
     build: .
     image: pgvector-postgis:pg17
@@ -95,6 +130,10 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      media:
+        condition: service_started
+      recognition:
+        condition: service_started
     environment:
       # Base de datos: el host es el NOMBRE del servicio, no localhost.
       DB_HOST: postgres
@@ -109,23 +148,227 @@ services:
       # Front en producción (CORS). Ej: "https://app.tudominio.com"
       CORS_ORIGINS: ${CORS_ORIGINS}
       # JWT
-      JWT_SECRET: ${JWT_SECRET}
       JWT_EXPIRE_MINUTES: "480"
       ROLES_TOKEN_SIN_EXPIRACION: "kiosko" # rol del scanner (antes 'scanner')
       # Empresa "comodín" del super-admin (ve TODAS las empresas)
       EMPRESA_ADMIN: "99"
-      # Reconocimiento facial / anti-spoof
+      # Token que prueba que el request pasó por Traefik (anti-bypass del gateway).
+      # DEBE coincidir con el valor del middleware gateway-token (label de abajo).
+      GATEWAY_INTERNAL_TOKEN: ${GATEWAY_INTERNAL_TOKEN:-CAMBIAR_gateway_token}
+      # Microservicio recognition: el backend le manda las imágenes (ya no corre
+      # InsightFace/OpenCV aquí). El stack de visión y el anti-spoof viven allá.
+      RECOGNITION_SERVICE_URL: "http://recognition:8000"
+      RECOGNITION_INTERNAL_TOKEN: ${RECOGNITION_INTERNAL_TOKEN}
+      # Microservicio media: el backend ya NO monta el disco de fotos; las guarda
+      # y recupera por la API interna de 'media' (token compartido).
+      MEDIA_SERVICE_URL: "http://media:8000"
+      MEDIA_INTERNAL_TOKEN: ${MEDIA_INTERNAL_TOKEN}
+    labels:
+      - "traefik.enable=true"
+      # Catch-all (access): lo que no capturen los demás servicios cae aquí.
+      # PathPrefix(`/`) es la regla más corta → menor prioridad (fallback).
+      - "traefik.http.routers.backend.rule=PathPrefix(`/`)"
+      - "traefik.http.routers.backend.entrypoints=web"
+      - "traefik.http.routers.backend.middlewares=jwt-auth@file,gateway-token@docker,rate-limit@file,secure-headers@file"
+      - "traefik.http.services.backend.loadbalancer.server.port=8000"
+      # Define el middleware gateway-token (compartido por los 4 routers). El secreto
+      # viene del .env vía compose (no queda en el repo); Traefik lo inyecta como
+      # X-Gateway-Token, sobreescribiendo cualquier valor que mande el cliente.
+      - "traefik.http.middlewares.gateway-token.headers.customRequestHeaders.X-Gateway-Token=${GATEWAY_INTERNAL_TOKEN:-CAMBIAR_gateway_token}"
+
+  # ── Microservicio identity (login, JWT, usuarios, roles) ───────────────────
+  # Imagen LIGERA (sin visión/IA). Se conecta con el rol de MÍNIMO PRIVILEGIO
+  # svc_identity. Emite el JWT self-contained y lo VALIDA por todos en /validate
+  # (lo llama el ForwardAuth de Traefik). Es el ÚNICO servicio que tiene el
+  # JWT_SECRET; los demás confían en los headers X-* que inyecta el gateway.
+  identity:
+    build:
+      context: ../app/identity
+      dockerfile: Dockerfile
+    image: sl-identity:latest
+    container_name: sl_identity
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_USER: svc_identity
+      DB_PASSWORD: ${SVC_IDENTITY_PASSWORD:-CAMBIAR_identity}
+      DB_NAME: ${POSTGRES_DB:-SL_ASISTENCIAS}
+      APP_TITLE: "Identity Service"
+      APP_VERSION: "1.0.0"
+      DEBUG: "false"
+      CORS_ORIGINS: ${CORS_ORIGINS}
+      JWT_SECRET: ${JWT_SECRET}  # ÚNICO servicio que lo necesita (emite y valida el JWT)
+      JWT_EXPIRE_MINUTES: "480"
+      ROLES_TOKEN_SIN_EXPIRACION: "kiosko"
+      EMPRESA_ADMIN: "99"
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.identity.rule=PathPrefix(`/usuarios`) || PathPrefix(`/roles`)"
+      - "traefik.http.routers.identity.entrypoints=web"
+      - "traefik.http.routers.identity.middlewares=rate-limit@file,secure-headers@file"
+      - "traefik.http.services.identity.loadbalancer.server.port=8000"
+
+  # ── Microservicio media (almacena/sirve las fotos protegidas) ──────────────
+  # Imagen MÍNIMA (sin BD). Dueño del volumen media_data. Solo el backend lo llama
+  # por su API interna (token compartido); NO se expone al host (sin 'ports').
+  media:
+    build:
+      context: ../app/media
+      dockerfile: Dockerfile
+    image: sl-media:latest
+    container_name: sl_media
+    restart: unless-stopped
+    environment:
+      MEDIA_DIR: /app/data
+      MEDIA_URL: /media
+      MEDIA_INTERNAL_TOKEN: ${MEDIA_INTERNAL_TOKEN}
+      DEBUG: "false"
+    labels:
+      - "traefik.enable=false"   # interno: nunca expuesto por el gateway
+    volumes:
+      - media_data:/app/data
+
+  # ── Microservicio recognition (motor facial compute-heavy) ─────────────────
+  # Imagen PESADA (InsightFace + OpenCV + ONNX + modelo). Se conecta como
+  # svc_recognition (SOLO LECTURA de embeddings/trabajadores). NO se expone al host
+  # (sin 'ports'): solo el backend lo llama por su API interna (token). Para escalar
+  # el reconocimiento, sube réplicas de ESTE servicio.
+  recognition:
+    build:
+      context: ../app/recognition
+      dockerfile: Dockerfile
+    image: sl-recognition:latest
+    container_name: sl_recognition
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_USER: svc_recognition
+      DB_PASSWORD: ${SVC_RECOGNITION_PASSWORD:-CAMBIAR_recognition}
+      DB_NAME: ${POSTGRES_DB:-SL_ASISTENCIAS}
+      APP_TITLE: "Recognition Service"
+      APP_VERSION: "1.0.0"
+      DEBUG: "false"
       PRELOAD_FACE_MODEL: "true"
       ANTISPOOFING_ACTIVO: "true"
       ANTISPOOF_REAL_INDEX: "1"
       ANTISPOOF_UMBRAL: "0.6"
       ANTISPOOF_DIV255: "false"
-    volumes:
-      # Fotos de incidencias/intentos: volumen para que PERSISTAN entre redeploys.
-      - media_data:/app/media
-    ports:
-      - "127.0.0.1:8000:8000" # solo accesible desde el host → Nginx
+      RECOGNITION_INTERNAL_TOKEN: ${RECOGNITION_INTERNAL_TOKEN}
+    labels:
+      - "traefik.enable=false"   # interno: nunca expuesto por el gateway
+
+  # ── Microservicio tenancy (empresas, áreas, puertas, dispositivos) ─────────
+  # CRUD de la estructura física. Conecta como svc_tenancy. Es público vía Nginx
+  # (/empresas /areas /puertas /dispositivos → 8002).
+  tenancy:
+    build:
+      context: ../app/tenancy
+      dockerfile: Dockerfile
+    image: sl-tenancy:latest
+    container_name: sl_tenancy
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_USER: svc_tenancy
+      DB_PASSWORD: ${SVC_TENANCY_PASSWORD:-CAMBIAR_tenancy}
+      DB_NAME: ${POSTGRES_DB:-SL_ASISTENCIAS}
+      APP_TITLE: "Tenancy Service"
+      APP_VERSION: "1.0.0"
+      DEBUG: "false"
+      CORS_ORIGINS: ${CORS_ORIGINS}
+      EMPRESA_ADMIN: "99"
+      # Token anti-bypass del gateway (debe coincidir con el middleware gateway-token).
+      GATEWAY_INTERNAL_TOKEN: ${GATEWAY_INTERNAL_TOKEN:-CAMBIAR_gateway_token}
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.tenancy.rule=PathPrefix(`/empresas`) || PathPrefix(`/areas`) || PathPrefix(`/puertas`) || PathPrefix(`/dispositivos`)"
+      - "traefik.http.routers.tenancy.entrypoints=web"
+      - "traefik.http.routers.tenancy.middlewares=jwt-auth@file,gateway-token@docker,rate-limit@file,secure-headers@file"
+      - "traefik.http.services.tenancy.loadbalancer.server.port=8000"
+
+  # ── Microservicio workers (trabajadores + embeddings/biometría) ────────────
+  # CRUD de RRHH. Conecta como svc_workers. Llama a recognition para enrolar
+  # (extraer el embedding de una foto). Público vía Nginx (/trabajadores /embeddings → 8003).
+  workers:
+    build:
+      context: ../app/workers
+      dockerfile: Dockerfile
+    image: sl-workers:latest
+    container_name: sl_workers
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      recognition:
+        condition: service_started
+    environment:
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_USER: svc_workers
+      DB_PASSWORD: ${SVC_WORKERS_PASSWORD:-CAMBIAR_workers}
+      DB_NAME: ${POSTGRES_DB:-SL_ASISTENCIAS}
+      APP_TITLE: "Workers Service"
+      APP_VERSION: "1.0.0"
+      DEBUG: "false"
+      CORS_ORIGINS: ${CORS_ORIGINS}
+      EMPRESA_ADMIN: "99"
+      # Token anti-bypass del gateway (debe coincidir con el middleware gateway-token).
+      GATEWAY_INTERNAL_TOKEN: ${GATEWAY_INTERNAL_TOKEN:-CAMBIAR_gateway_token}
+      RECOGNITION_SERVICE_URL: "http://recognition:8000"
+      RECOGNITION_INTERNAL_TOKEN: ${RECOGNITION_INTERNAL_TOKEN}
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.workers.rule=PathPrefix(`/trabajadores`) || PathPrefix(`/embeddings`)"
+      - "traefik.http.routers.workers.entrypoints=web"
+      - "traefik.http.routers.workers.middlewares=jwt-auth@file,gateway-token@docker,rate-limit@file,secure-headers@file"
+      - "traefik.http.services.workers.loadbalancer.server.port=8000"
+
+  # ── Microservicio reports (reportes, SOLO LECTURA + export XLSX/CSV) ────────
+  # Conecta como svc_reports (SELECT a todo; idealmente una réplica de lectura).
+  # Público vía Nginx (/reportes → 8004).
+  reports:
+    build:
+      context: ../app/reports
+      dockerfile: Dockerfile
+    image: sl-reports:latest
+    container_name: sl_reports
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_USER: svc_reports
+      DB_PASSWORD: ${SVC_REPORTS_PASSWORD:-CAMBIAR_reports}
+      DB_NAME: ${POSTGRES_DB:-SL_ASISTENCIAS}
+      APP_TITLE: "Reports Service"
+      APP_VERSION: "1.0.0"
+      DEBUG: "false"
+      CORS_ORIGINS: ${CORS_ORIGINS}
+      EMPRESA_ADMIN: "99"
+      # Token anti-bypass del gateway (debe coincidir con el middleware gateway-token).
+      GATEWAY_INTERNAL_TOKEN: ${GATEWAY_INTERNAL_TOKEN:-CAMBIAR_gateway_token}
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.reports.rule=PathPrefix(`/reportes`)"
+      - "traefik.http.routers.reports.entrypoints=web"
+      - "traefik.http.routers.reports.middlewares=jwt-auth@file,gateway-token@docker,rate-limit@file,secure-headers@file"
+      - "traefik.http.services.reports.loadbalancer.server.port=8000"
 
 volumes:
   postgres_data:
   media_data:
+  traefik_letsencrypt:

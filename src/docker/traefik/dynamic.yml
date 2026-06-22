@@ -1,0 +1,37 @@
+# Traefik v3 — configuración DINÁMICA (middlewares compartidos).
+# Se referencian desde las labels de cada servicio como "<nombre>@file".
+http:
+  middlewares:
+
+    # Límite de peticiones por IP (protege endpoints públicos de abuso).
+    rate-limit:
+      rateLimit:
+        average: 100   # req/s promedio sostenido por IP de cliente
+        burst: 50      # ráfaga permitida por encima del promedio
+        period: 1s
+
+    # Cabeceras de seguridad básicas para todas las respuestas.
+    secure-headers:
+      headers:
+        frameDeny: true
+        contentTypeNosniff: true
+        browserXssFilter: true
+        referrerPolicy: "strict-origin-when-cross-origin"
+
+    # Validación de JWT CENTRALIZADA (AUTENTICACIÓN del sistema).
+    # Traefik consulta este endpoint en identity ANTES de pasar el request al
+    # servicio destino: si el token es válido, identity responde 204 + headers X-*
+    # (identidad) que Traefik inyecta al request; si no, 401 y el servicio nunca se
+    # toca. Así el token se valida UNA sola vez, en el borde. La AUTORIZACIÓN por
+    # scope sigue en cada servicio (lee X-Scopes). Se aplica a backend/tenancy/
+    # workers/reports; identity NO lo usa (valida su propio token y su login es público).
+    jwt-auth:
+      forwardAuth:
+        address: "http://identity:8000/validate"
+        authResponseHeaders:
+          - "X-User-Id"
+          - "X-Empresa"
+          - "X-Scopes"
+          - "X-Rol"
+          - "X-Id-Rol"
+          - "X-Nombre-Usuario"

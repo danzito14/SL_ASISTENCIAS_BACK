@@ -77,14 +77,13 @@ class IntentoAccesoService:
         )
         return fila[0] if fila else None
 
-    def ruta_archivo_foto(self, id_intento: UUID, db: Session) -> str | None:
+    def foto_bytes(self, id_intento: UUID, db: Session) -> bytes | None:
         """
-        Ruta ABSOLUTA en disco de la foto del intento (o None si no hay foto o falta
-        el archivo). La resolución y la defensa anti path-traversal las hace
-        media_service. Lanza 404 si el intento no existe.
+        Bytes JPEG de la foto del intento, recuperados del servicio media. None si no
+        hay foto o media no la encuentra. Lanza 404 si el intento no existe.
         """
         intento = self.obtener(id_intento, db)
-        return media_service.ruta_archivo(intento.ruta_foto)
+        return media_service.obtener_bytes(intento.ruta_foto)
 
 
 intento_acceso_service = IntentoAccesoService()

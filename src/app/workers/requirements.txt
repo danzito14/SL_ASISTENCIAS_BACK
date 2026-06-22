@@ -1,0 +1,14 @@
+# workers — web + DB + pgvector (embeddings) + cliente HTTP a recognition. Sin visión/IA.
+fastapi==0.115.0
+uvicorn==0.30.6
+gunicorn==23.0.0
+SQLAlchemy==2.0.50
+pgvector==0.4.2
+numpy==2.4.6
+psycopg2-binary==2.9.10
+pydantic==2.9.2
+pydantic-settings==2.5.2
+PyJWT==2.9.0
+python-multipart==0.0.30
+python-dotenv==1.0.1
+requests==2.34.2

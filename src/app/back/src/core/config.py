@@ -21,8 +21,9 @@ class Settings(BaseSettings):
     # Los de localhost/LAN ya los permite el regex de main.py.
     CORS_ORIGINS: str = ""
 
-    # Autenticación (JWT)
-    JWT_SECRET: str = os.getenv("JWT_SECRET")  # ⚠️ Sobreescribe en .env para producción
+    # Autenticación (JWT). Ya NO se usa aquí: el gateway (identity /validate) valida
+    # el token y este servicio confía en los headers X-*. Opcional por compatibilidad.
+    JWT_SECRET: str | None = os.getenv("JWT_SECRET")
     JWT_ALGORITHM: str = "HS256"
     JWT_EXPIRE_MINUTES: int = 0  # Duración del token (min) para usuarios normales. 0 = NO expira.
     # Roles cuyo token NUNCA expira (lista separada por comas). El kiosko
@@ -32,10 +33,20 @@ class Settings(BaseSettings):
     # Empresa "comodín": un usuario con este id de empresa es super-admin y puede
     # ver/operar TODAS las empresas (se salta el filtro por empresa).
     EMPRESA_ADMIN: int = 99
+    GATEWAY_INTERNAL_TOKEN: str = ""  # X-Gateway-Token que inyecta Traefik; vacio = no se exige
 
     # Archivos (fotos de incidencias, etc.)
-    MEDIA_DIR: str = "media"    # carpeta en disco (relativa a back_py) donde se guardan
-    MEDIA_URL: str = "/media"   # prefijo web con el que se sirven (lo publica Nginx)
+    MEDIA_DIR: str = "media"    # (en desuso: media es dueño del disco) carpeta heredada
+    MEDIA_URL: str = "/media"   # prefijo web con el que se guarda la ruta_foto en la BD
+    # Microservicio media (almacenamiento/servido de fotos). El backend habla con él
+    # por HTTP interno (token compartido); ya no toca el disco directamente.
+    MEDIA_SERVICE_URL: str = "http://media:8000"
+    MEDIA_INTERNAL_TOKEN: str = os.getenv("MEDIA_INTERNAL_TOKEN", "")
+
+    # Microservicio recognition (motor facial). El backend le manda las imágenes y
+    # recibe el resultado + el recorte de cara. Ya no corre InsightFace/OpenCV aquí.
+    RECOGNITION_SERVICE_URL: str = "http://recognition:8000"
+    RECOGNITION_INTERNAL_TOKEN: str = os.getenv("RECOGNITION_INTERNAL_TOKEN", "")
 
     # Reconocimiento facial
     PRELOAD_FACE_MODEL: bool = False  # Si True, carga buffalo_l al arrancar

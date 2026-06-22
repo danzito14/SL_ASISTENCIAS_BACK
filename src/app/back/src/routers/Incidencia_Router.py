@@ -3,8 +3,7 @@ from datetime import date
 from typing import Literal
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
-from fastapi.responses import FileResponse
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from sqlalchemy.orm import Session
 
 from src.core.auth import exigir_empresa, resolver_empresa_scope, usuario_actual
@@ -138,13 +137,13 @@ def foto_incidencia(
     # Encapsulación: la incidencia debe ser de tu empresa (403 si no).
     exigir_empresa(usuario, incidencia_service.empresa_de_incidencia(id_incidencia, db))
 
-    ruta = incidencia_service.ruta_archivo_foto(id_incidencia, db)
-    if ruta is None:
+    data = incidencia_service.foto_bytes(id_incidencia, db)
+    if data is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Esta incidencia no tiene foto.",
         )
-    return FileResponse(ruta, media_type="image/jpeg")
+    return Response(content=data, media_type="image/jpeg")
 
 
 # ── Actualizar incidencia ─────────────────────────────────────────────────────
