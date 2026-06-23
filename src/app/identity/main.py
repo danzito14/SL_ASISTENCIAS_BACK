@@ -84,6 +84,11 @@ def validate(request: Request):
     identidad en headers X-* (204) o rechaza (401). Los demás microservicios
     confían en esos headers en vez de revalidar el token.
     """
+    # Preflight CORS: el OPTIONS nunca trae token. Se deja pasar para que el servicio
+    # destino responda los headers CORS (la petición real GET/POST sí se valida).
+    if request.headers.get("X-Forwarded-Method", "").upper() == "OPTIONS":
+        return Response(status_code=204)
+
     # Path ORIGINAL que pidió el cliente (Traefik lo reenvía en X-Forwarded-Uri).
     path = request.headers.get("X-Forwarded-Uri", "").split("?", 1)[0]
     if path in _GW_PUBLICAS or path.startswith("/docs"):

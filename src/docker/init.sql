@@ -318,8 +318,10 @@ CREATE TABLE IF NOT EXISTS trabajadores (
                              ON UPDATE CASCADE ON DELETE CASCADE,
     permiso_escaneo      permiso_escaneo   NOT NULL DEFAULT 'campo',
     -- Nivel de acceso a zonas internas (puertas de control_acceso). Independiente
-    -- de permiso_escaneo (que es para fichar). Default 'oficina'.
-    nivel_acceso_interno nivel_acceso_interno NOT NULL DEFAULT 'oficina',
+    -- de permiso_escaneo (que es para fichar). NULL = SIN acceso interno (lo típico
+    -- de los de campo): evaluar_acceso_interno niega SIEMPRE a un nivel NULL, incluso
+    -- en zonas 'mixto'. Solo administrativos/empaque llevan oficina/empaque/mixto.
+    nivel_acceso_interno nivel_acceso_interno,
     foto_perfil          BYTEA,
     estado               estado_trabajador NOT NULL DEFAULT 'activo',
     inactivo_por_cascada BOOLEAN           NOT NULL DEFAULT FALSE,
@@ -929,6 +931,12 @@ BEGIN
     IF v_permiso <> 'super' AND v_emp_trab IS DISTINCT FROM v_emp_puerta THEN
         v_res := 'negado';
         v_motivo := 'Acceso a zona de otra empresa sin permiso super.';
+    -- ── Capa "sin acceso interno" ──
+    --   nivel NULL (típico de los de campo) = NUNCA pasa por una puerta interna,
+    --   ni siquiera a zonas 'mixto'. Va ANTES del chequeo de zona a propósito.
+    ELSIF v_nivel IS NULL THEN
+        v_res := 'negado';
+        v_motivo := 'El trabajador no tiene acceso a zonas internas (solo fichaje de campo).';
     -- ── Capa zona ──
     --   permitido si: la zona destino es 'mixto', o el nivel del trabajador es
     --   'mixto', o nivel coincide con la zona destino.

@@ -60,7 +60,10 @@ class TrabajadorService:
             id_area=datos.id_area,
             id_empresa=area.id_empresa,
             permiso_escaneo=datos.permiso_escaneo,
-            nivel_acceso_interno=datos.nivel_acceso_interno,
+            # Regla: los de campo NO tienen acceso a zonas internas → nivel NULL,
+            # ignorando lo que mande el cliente. Los demás conservan su nivel.
+            nivel_acceso_interno=(None if datos.permiso_escaneo == "campo"
+                                  else datos.nivel_acceso_interno),
             estado=datos.estado,
         )
         db.add(trabajador)
@@ -178,6 +181,12 @@ class TrabajadorService:
                 )
             # El id_empresa denormalizado sigue al área del trabajador.
             cambios["id_empresa"] = area.id_empresa
+
+        # Regla: si el trabajador queda como 'campo', su nivel de acceso interno
+        # debe ser NULL (no entra a zonas internas), ignore lo que mande el cliente.
+        permiso_efectivo = cambios.get("permiso_escaneo", trabajador.permiso_escaneo)
+        if permiso_efectivo == "campo":
+            cambios["nivel_acceso_interno"] = None
 
         for campo, valor in cambios.items():
             setattr(trabajador, campo, valor)

@@ -28,7 +28,7 @@ class Trabajador(Base):
     # id_empresa denormalizado (aislamiento multi-tenant sin joins).
     id_empresa = Column(Integer)
     permiso_escaneo = Column(String(20), nullable=False, default="campo")
-    nivel_acceso_interno = Column(String(20), nullable=False, default="oficina")
+    nivel_acceso_interno = Column(String(20), nullable=True, default=None)  # NULL = sin acceso interno (campo)
     foto_perfil = Column(LargeBinary)
     estado = Column(String(15), default="activo")
     inactivo_por_cascada = Column(Boolean, nullable=False, default=False)

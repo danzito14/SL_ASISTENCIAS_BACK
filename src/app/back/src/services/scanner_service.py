@@ -192,13 +192,70 @@ class ScannerService:
         escaneo = self._registrar_escaneo(escaneo, db)
         self._validar_escaneo_online(escaneo, db)
         self._guardar_foto_si_incidencia(escaneo, recorte, db)
+
+        brief = TrabajadorBrief(id_trabajador=trab["id_trabajador"], nombre=trab["nombre"],
+                                apellido=trab["apellido"], estado="activo")
+        # validar_escaneos_lote pudo marcar el escaneo como 'rechazado'/'fuera_de_area'
+        # (puerta incompatible con el permiso, otra empresa, fuera del área). Reflejarlo
+        # en la respuesta en vez de decir siempre "Acceso concedido".
+        if escaneo.estado_registro != "exitoso":
+            inc = (db.query(Incidencia)
+                     .filter(Incidencia.id_escaneo_ref == escaneo.id_escaneo)
+                     .order_by(Incidencia.id_incidencia.desc()).first())
+            motivo = inc.descripcion if inc and inc.descripcion else "Acceso no permitido en esta puerta."
+            return ScanResponse(
+                acceso=False, mensaje=f"Acceso denegado — {motivo}",
+                trabajador=brief, id_escaneo=escaneo.id_escaneo,
+                estado_registro=escaneo.estado_registro,
+            )
         return ScanResponse(
             acceso=True,
             mensaje=f"Acceso concedido — {trab['nombre']} {trab['apellido']} (similitud: {similitud:.2%}).",
-            trabajador=TrabajadorBrief(id_trabajador=trab["id_trabajador"], nombre=trab["nombre"],
-                                       apellido=trab["apellido"], estado="activo"),
-            id_escaneo=escaneo.id_escaneo,
-            estado_registro="exitoso",
+            trabajador=brief, id_escaneo=escaneo.id_escaneo, estado_registro="exitoso",
+        )
+
+    # ── Despacho del match según la función de la puerta ────────────────────────
+    def _procesar_match(self, res: dict, recorte: bytes | None, id_puerta: int, tipo_registro: str,
+                        id_dispositivo: int | None, db: Session, latitud, longitud, observaciones: str) -> ScanResponse:
+        """Puerta 'asistencia' → fichaje; puerta 'control_acceso' → acceso interno (zona)."""
+        puerta = tenancy_service.obtener_puerta(id_puerta, db)
+        if puerta is not None and puerta.funcion_puerta == "control_acceso":
+            return self._evaluar_acceso_interno(res, id_puerta, id_dispositivo, db)
+        return self._registrar_match(res, recorte, id_puerta, tipo_registro,
+                                     id_dispositivo, db, latitud, longitud, observaciones)
+
+    def _evaluar_acceso_interno(self, res: dict, id_puerta: int, id_dispositivo: int | None,
+                                db: Session) -> ScanResponse:
+        """
+        Puerta interna (funcion_puerta='control_acceso'): decide el paso con la función
+        evaluar_acceso_interno (nivel_acceso_interno del trabajador vs categoria_zona de
+        la puerta; NULL = sin acceso interno → siempre negado). Registra el intento en
+        accesos_internos. NO genera asistencia (eso es solo para puertas de fichaje).
+        """
+        trab = res["trabajador"]
+        brief = TrabajadorBrief(id_trabajador=trab["id_trabajador"], nombre=trab["nombre"],
+                                apellido=trab["apellido"], estado="activo")
+        try:
+            fila = db.execute(
+                text("SELECT resultado, motivo FROM evaluar_acceso_interno(:t, :p, NULL, :c, :d)"),
+                {"t": trab["id_trabajador"], "p": id_puerta,
+                 "c": round(trab["similitud"], 2), "d": id_dispositivo},
+            ).mappings().first()
+            db.commit()
+        except Exception as exc:
+            db.rollback()
+            logger.error("No se pudo evaluar el acceso interno en la puerta %s: %s", id_puerta, exc)
+            return _rechazo("No se pudo evaluar el acceso interno.")
+
+        if fila and fila["resultado"] == "permitido":
+            return ScanResponse(
+                acceso=True, mensaje=f"Acceso concedido — {trab['nombre']} {trab['apellido']}.",
+                trabajador=brief, id_escaneo=None, estado_registro="exitoso",
+            )
+        motivo = fila["motivo"] if fila and fila["motivo"] else "Acceso a la zona no permitido."
+        return ScanResponse(
+            acceso=False, mensaje=f"Acceso denegado — {motivo}",
+            trabajador=brief, id_escaneo=None, estado_registro="rechazado",
         )
 
     # ── Pipelines de acceso ─────────────────────────────────────────────────────
@@ -222,7 +279,7 @@ class ScannerService:
             return _rechazo("Rostro no reconocido en esta empresa.")
         # match
         sim = res["trabajador"]["similitud"]
-        return self._registrar_match(res, recorte, id_puerta, tipo_registro, id_dispositivo, db, latitud, longitud,
+        return self._procesar_match(res, recorte, id_puerta, tipo_registro, id_dispositivo, db, latitud, longitud,
                                       observaciones=f"Reconocimiento facial. Similitud: {sim:.4f}")
 
     def procesar_fotos_acceso(self, fotos_bytes: list[bytes], id_puerta: int, tipo_registro: str,
@@ -248,7 +305,7 @@ class ScannerService:
         # match
         sim = res["trabajador"]["similitud"]
         mov = res.get("movimiento", 0.0)
-        return self._registrar_match(res, recorte, id_puerta, tipo_registro, id_dispositivo, db, latitud, longitud,
+        return self._procesar_match(res, recorte, id_puerta, tipo_registro, id_dispositivo, db, latitud, longitud,
                                       observaciones=f"Facial + liveness. Similitud: {sim:.4f}, movimiento: {mov:.4f}")
 
 

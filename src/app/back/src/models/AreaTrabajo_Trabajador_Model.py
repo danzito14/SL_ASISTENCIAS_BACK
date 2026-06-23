@@ -42,7 +42,8 @@ class Trabajador(Base):
     # Dónde puede fichar: 'campo' | 'administrativo' | 'general' | 'super'.
     permiso_escaneo = Column(String(20), nullable=False, default="campo")
     # Acceso a zonas internas (puertas control_acceso): 'oficina' | 'empaque' | 'mixto'.
-    nivel_acceso_interno = Column(String(20), nullable=False, default="oficina")
+    # NULL = sin acceso interno (lo típico de los de campo).
+    nivel_acceso_interno = Column(String(20), nullable=True, default=None)
     foto_perfil = Column(LargeBinary)
     estado = Column(String(15), default="activo")
     inactivo_por_cascada = Column(Boolean, nullable=False, default=False)

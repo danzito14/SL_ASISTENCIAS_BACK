@@ -87,6 +87,27 @@ se enruta solo con labels.
 - `GET /usuarios/login` → 422 (identity lo atiende sin token: login público).
 - → La cadena completa **gateway → ForwardAuth/JWT centralizado → scope → servicio** funciona.
 
+### H) Control de acceso por puerta — 2 fixes ✅
+La lógica de permisos vive en funciones PL/pgSQL; faltaba **conectarla** y **reflejarla**.
+- **Sistema A (fichaje, `funcion_puerta='asistencia'`):** `validar_escaneos_lote` compara
+  `tipo_puerta` (campo/administrativa/mixta) ↔ `permiso_escaneo`. Ya marcaba el escaneo
+  `rechazado` + incidencia `area_incorrecta`, pero el scanner respondía **siempre "Acceso
+  concedido"**. **Fix A:** `_registrar_match` ahora lee `estado_registro` tras validar y
+  responde `acceso=False` + el motivo de la incidencia (campo↔administrativa, otra empresa,
+  fuera de área).
+- **Sistema B (acceso interno, `funcion_puerta='control_acceso'`):** `evaluar_acceso_interno`
+  compara `nivel_acceso_interno` (oficina/empaque/mixto) ↔ `categoria_zona_destino`. **No lo
+  llamaba nadie.** **Fix B:** el scanner ramifica por `funcion_puerta` (`_procesar_match` →
+  `_evaluar_acceso_interno`); las puertas internas deciden con esa función (registra en
+  `accesos_internos`, no genera asistencia).
+- **Regla del NULL (clave):** `nivel_acceso_interno` pasó a **NULLABLE**; el servicio de
+  workers **fuerza NULL cuando `permiso_escaneo='campo'`** (antes el default `'oficina'` daba
+  acceso a oficinas por error). `evaluar_acceso_interno` **niega SIEMPRE** un nivel NULL,
+  incluso en zonas `'mixto'` (el check de NULL va antes que el de zona).
+- **Probado en vivo** (transacción revertida): campo(NULL)→oficina **negado**, empaque→oficina
+  **negado**, oficina→oficina **permitido**, mixto→oficina **permitido**, campo(NULL)→mixto
+  **negado**. Backend+workers reconstruidos; `/trabajadores` y `/asistencias` → 200.
+
 **Archivos nuevos:** `src/docker/traefik/{traefik.yml,dynamic.yml}`.
 
 ### G) Validación de JWT CENTRALIZADA (ForwardAuth) ✅
@@ -96,6 +117,12 @@ ocurre UNA vez en el borde y cada servicio solo hace **autorización** por scope
   y responde **204 + headers `X-*`** (`X-User-Id`, `X-Empresa`, `X-Scopes`, `X-Rol`,
   `X-Id-Rol`, `X-Nombre-Usuario`) o **401**. Es público en el guard de identity y
   respeta rutas públicas (lee `X-Forwarded-Uri`: health/docs pasan sin token).
+  **Importante (CORS):** deja pasar los **preflight `OPTIONS`** (lee `X-Forwarded-Method`)
+  → si no, el ForwardAuth respondería 401 al preflight y el navegador bloquearía TODAS las
+  llamadas con auth del front (el OPTIONS nunca trae token; la petición real sí se valida).
+- **Alias de dev `:8000`**: Traefik publica también `127.0.0.1:8000:80` para que el front
+  antiguo (apuntaba al monolito en `:8000`) enrute por el gateway sin cambios. Lo correcto a
+  futuro: apuntar el front al `:80`/dominio (`environment.ts` → `apiUrl`) y quitar el alias.
 - **Traefik** llama a `/validate` por **ForwardAuth** (`jwt-auth@file`) antes de enrutar
   a backend/tenancy/workers/reports; si es 401, el servicio nunca se toca. identity NO
   usa `jwt-auth` (valida su propio token y su `/usuarios/login` debe ser público).

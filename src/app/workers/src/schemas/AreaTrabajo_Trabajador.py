@@ -61,8 +61,9 @@ class TrabajadorBase(BaseModel):
     estado: EstadoTrabajador = "activo"
     # Dónde puede fichar (default 'campo': la mayoría son de campo).
     permiso_escaneo: PermisoEscaneo = "campo"
-    # Acceso a zonas internas (default 'oficina').
-    nivel_acceso_interno: NivelAccesoInterno = "oficina"
+    # Acceso a zonas internas. NULL = sin acceso interno (lo típico de los de campo).
+    # El servicio FUERZA NULL cuando permiso_escaneo='campo'.
+    nivel_acceso_interno: NivelAccesoInterno | None = None
 
 
 class TrabajadorCreate(TrabajadorBase):
