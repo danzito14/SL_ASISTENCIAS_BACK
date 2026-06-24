@@ -223,6 +223,8 @@ class IncidenciaService:
                     "similitud": None,
                     "tiene_foto": bool(i.ruta_foto),
                     "foto_url": f"/incidencias/{i.id_incidencia}/foto" if i.ruta_foto else None,
+                    # Escaneo origen → el front pide GET /escaneos/{id} para el detalle.
+                    "id_escaneo_ref": i.id_escaneo_ref,
                 })
 
         # ── Intentos de acceso ────────────────────────────────────────────────
@@ -259,6 +261,8 @@ class IncidenciaService:
                     "similitud": sim,
                     "tiene_foto": bool(t.ruta_foto),
                     "foto_url": f"/intentos/{t.id_intento}/foto" if t.ruta_foto else None,
+                    # Un intento es un acceso FALLIDO: no genera escaneo → sin referencia.
+                    "id_escaneo_ref": None,
                 })
 
         # Merge: ordenar por fecha/hora desc y paginar sobre el conjunto combinado.

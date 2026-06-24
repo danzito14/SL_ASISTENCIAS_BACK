@@ -115,6 +115,17 @@ GRANT USAGE, SELECT ON SEQUENCE
 -- SELECT cruzado a tenancy (validar área / derivar empresa):
 GRANT SELECT ON area_trabajo, empresas TO svc_workers;
 
+-- employee_monitoring corre como svc_workers (sincroniza nómina SYS21 → trabajadores
+-- /embeddings) y es dueño de sus tablas de estado de sync. El DML sobre trabajadores
+-- /embeddings ya está concedido arriba; aquí se añaden las tablas propias del sync.
+GRANT SELECT, INSERT, UPDATE, DELETE ON
+    sync_estado, fotos_pendientes
+    TO svc_workers;
+GRANT USAGE, SELECT ON SEQUENCE
+    sync_estado_id_sync_seq,
+    fotos_pendientes_id_pendiente_seq
+    TO svc_workers;
+
 
 -- ════════════════════════════════════════════════════════════════════════════
 -- 5) RECOGNITION  — motor facial, SIN ESTADO (solo lee para hacer match)

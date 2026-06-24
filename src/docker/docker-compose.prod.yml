@@ -343,6 +343,62 @@ services:
       - "traefik.http.routers.workers.middlewares=jwt-auth@file,gateway-token@docker,rate-limit@file,secure-headers@file"
       - "traefik.http.services.workers.loadbalancer.server.port=8000"
 
+  # ── Microservicio employee_monitoring (sync nómina SYS21 → trabajadores) ────
+  # Lee la nómina externa SYS21 (MSSQL) y las fotos por SFTP, y mantiene
+  # sincronizados trabajadores/embeddings. Conecta como svc_workers (mismo dueño
+  # de esas tablas). INTERNO: por defecto NO se expone al gateway (sync + endpoints
+  # de admin). Para exponer /sync, ver las labels traefik comentadas abajo.
+  employee_monitoring:
+    build:
+      context: ../app/employee_monitoring
+      dockerfile: Dockerfile
+    image: sl-employee-monitoring:latest
+    container_name: sl_employee_monitoring
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      recognition:
+        condition: service_started
+    environment:
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_USER: svc_workers
+      DB_PASSWORD: ${SVC_WORKERS_PASSWORD:-CAMBIAR_workers}
+      DB_NAME: ${POSTGRES_DB:-SL_ASISTENCIAS}
+      APP_TITLE: "Employee Monitoring Service"
+      APP_VERSION: "1.0.0"
+      DEBUG: "false"
+      CORS_ORIGINS: ${CORS_ORIGINS}
+      EMPRESA_ADMIN: "99"
+      GATEWAY_INTERNAL_TOKEN: ${GATEWAY_INTERNAL_TOKEN:-CAMBIAR_gateway_token}
+      RECOGNITION_SERVICE_URL: "http://recognition:8000"
+      RECOGNITION_INTERNAL_TOKEN: ${RECOGNITION_INTERNAL_TOKEN}
+      # Nómina SYS21 (origen de empleados)
+      SYS_21_URL_AGRICOLA: ${SYS_21_URL_AGRICOLA}
+      SYS_21_URL_AGRICOLA_COM: ${SYS_21_URL_AGRICOLA_COM}
+      # Servidor de fotos (SFTP con llave)
+      FOTOS_SFTP_HOST: ${FOTOS_SFTP_HOST}
+      FOTOS_SFTP_PORT: ${FOTOS_SFTP_PORT:-22}
+      FOTOS_SFTP_USER: ${FOTOS_SFTP_USER}
+      FOTOS_SFTP_KEY_PATH: /run/secrets/fotos_ssh_key
+      FOTOS_SFTP_BASE_DIR: ${FOTOS_SFTP_BASE_DIR}
+      # Sincronización / scheduler
+      SYNC_ENABLED: "true"
+      SYNC_INTERVAL_MINUTES: ${SYNC_INTERVAL_MINUTES:-60}
+      SYNC_RUN_ON_STARTUP: "false"
+    volumes:
+      # Llave privada SSH para el SFTP de fotos (read-only). Apunta a tu llave real.
+      - ${FOTOS_SSH_KEY_HOST_PATH:-./secrets/fotos_ssh_key}:/run/secrets/fotos_ssh_key:ro
+    labels:
+      - "traefik.enable=false"   # interno: sync + admin. No expuesto por el gateway.
+      # Para exponer SOLO los endpoints de consulta/admin bajo /sync, descomenta:
+      # - "traefik.enable=true"
+      # - "traefik.http.routers.empmon.rule=PathPrefix(`/sync`)"
+      # - "traefik.http.routers.empmon.entrypoints=web"
+      # - "traefik.http.routers.empmon.middlewares=jwt-auth@file,gateway-token@docker,rate-limit@file,secure-headers@file"
+      # - "traefik.http.services.empmon.loadbalancer.server.port=8000"
+
   # ── Microservicio reports (reportes, SOLO LECTURA + export XLSX/CSV) ────────
   # Conecta como svc_reports (SELECT a todo; idealmente una réplica de lectura).
   # Público vía Nginx (/reportes → 8004).

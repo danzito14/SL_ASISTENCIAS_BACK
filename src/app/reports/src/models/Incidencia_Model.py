@@ -13,3 +13,5 @@ class Incidencia(Base):
     fecha           = Column(Date)
     estado          = Column(String(15))
     descripcion     = Column(Text)
+    # Escaneo que originó la incidencia (UUID → escaneos.id_escaneo); puede ser NULL.
+    id_escaneo_ref  = Column(UUID(as_uuid=True))

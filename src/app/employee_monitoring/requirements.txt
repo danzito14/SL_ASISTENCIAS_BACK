@@ -1,0 +1,18 @@
+# employee_monitoring — sincroniza nómina SYS21 (MSSQL) → PostgreSQL, fotos por SFTP
+# y embeddings vía el microservicio recognition. Sin visión/IA local (eso vive en
+# recognition); aquí solo se descargan/validan fotos y se delega la extracción.
+fastapi==0.115.0
+uvicorn==0.30.6
+gunicorn==23.0.0
+SQLAlchemy==2.0.50
+pgvector==0.4.2
+psycopg2-binary==2.9.10
+pyodbc==5.2.0
+pydantic==2.9.2
+pydantic-settings==2.5.2
+PyJWT==2.9.0
+python-dotenv==1.0.1
+requests==2.32.3
+paramiko==3.5.0
+Pillow==11.0.0
+APScheduler==3.10.4

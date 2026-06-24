@@ -248,6 +248,10 @@ CREATE TABLE IF NOT EXISTS area_trabajo (
     id_area              SERIAL PRIMARY KEY,
     nombre_area          VARCHAR(100) NOT NULL,
     descripcion          TEXT,
+    -- Clasificación operativa para el sync (employee_monitoring): grupo del área
+    -- 'oficina' | 'empaque' | 'campo'. De aquí salen permiso_escaneo y
+    -- nivel_acceso_interno por defecto del trabajador. NULL = sin clasificar.
+    tipo_area            VARCHAR(20),
     ubicacion            geography(POLYGON,4326),
     id_empresa           INT          REFERENCES empresas(id_empresa)
                              ON UPDATE CASCADE ON DELETE CASCADE,
@@ -310,6 +314,13 @@ CREATE TABLE IF NOT EXISTS puertas_acceso (
 -- id_empresa denormalizado para aislamiento multi-tenant sin joins.
 CREATE TABLE IF NOT EXISTS trabajadores (
     id_trabajador        SERIAL PRIMARY KEY,
+    -- Identidad EXTERNA en la nómina SYS21 (la sincroniza employee_monitoring).
+    -- NULL en trabajadores creados manualmente vía workers. El par
+    -- (id_emp, origen_nomina) es ÚNICO (idx_trabajadores_id_emp, parcial) y es la
+    -- clave de conflicto del upsert del sync. VARCHAR para soportar id numérico o
+    -- alfanumérico; origen_nomina distingue ASL_Nomina vs ASL_Nomina_COM.
+    id_emp               VARCHAR(50),
+    origen_nomina        VARCHAR(30),
     nombre               VARCHAR(100)      NOT NULL,
     apellido             VARCHAR(100)      NOT NULL,
     id_area              INT               NOT NULL REFERENCES area_trabajo(id_area)
@@ -341,6 +352,44 @@ CREATE TABLE IF NOT EXISTS embeddings (
     modelo_ia            VARCHAR(100),
     estado               estado_generico NOT NULL DEFAULT 'activo',
     inactivo_por_cascada BOOLEAN         NOT NULL DEFAULT FALSE
+);
+
+-- ── sync_estado (employee_monitoring) ─────────────────────────────────────────
+-- Estado OPERATIVO de la sincronización con la nómina SYS21. Una fila por
+-- (id_emp, origen_nomina): guarda los hashes para detectar cambios de DATOS y de
+-- FOTO (full-scan idempotente) y banderas de control de corrida. NO mapea a
+-- id_trabajador: ese vínculo ya vive en trabajadores.id_emp.
+CREATE TABLE IF NOT EXISTS sync_estado (
+    id_sync                 SERIAL PRIMARY KEY,
+    id_emp                  VARCHAR(50)  NOT NULL,
+    origen_nomina           VARCHAR(30)  NOT NULL,
+    id_empresa              INT,
+    hash_datos              VARCHAR(64),
+    hash_foto               VARCHAR(64),
+    foto_mtime              BIGINT,        -- mtime remoto (SFTP) para detectar foto nueva sin descargar
+    foto_size               BIGINT,        -- tamaño remoto (SFTP), idem
+    estado_foto             VARCHAR(20),   -- 'ok' | 'pendiente' | 'sin_foto'
+    visto_en_ultima_corrida BOOLEAN      NOT NULL DEFAULT FALSE,
+    ultima_sync             TIMESTAMPTZ,
+    ultima_sync_ok          TIMESTAMPTZ,
+    UNIQUE (id_emp, origen_nomina)
+);
+
+-- ── fotos_pendientes (employee_monitoring) ────────────────────────────────────
+-- Empleados cuya foto NO pasó las reglas de validación: hay que volver a tomarla.
+-- La llena el sync con el motivo del rechazo; un admin la consulta por endpoint.
+CREATE TABLE IF NOT EXISTS fotos_pendientes (
+    id_pendiente   SERIAL PRIMARY KEY,
+    id_emp         VARCHAR(50)  NOT NULL,
+    origen_nomina  VARCHAR(30)  NOT NULL,
+    id_trabajador  INT          REFERENCES trabajadores(id_trabajador) ON DELETE CASCADE,
+    id_empresa     INT,
+    -- formato_invalido | resolucion_baja | archivo_corrupto | archivo_grande |
+    -- sin_foto | no_rostro | spoofing | recognition_no_disponible | duplicado | area_invalida
+    motivo         VARCHAR(40)  NOT NULL,
+    detalle        TEXT,
+    fecha          TIMESTAMPTZ  DEFAULT NOW(),
+    estado         VARCHAR(15)  NOT NULL DEFAULT 'pendiente'  -- 'pendiente' | 'resuelto' | 'ignorado'
 );
 
 -- ── escaneos ─────────────────────────────────────────────────────────────────
@@ -517,6 +566,18 @@ CREATE TABLE IF NOT EXISTS parametros_sistema (
 CREATE INDEX IF NOT EXISTS idx_trabajadores_estado    ON trabajadores(estado);
 CREATE INDEX IF NOT EXISTS idx_trabajadores_empresa   ON trabajadores(id_empresa);
 CREATE INDEX IF NOT EXISTS idx_trabajadores_area      ON trabajadores(id_area);
+-- Identidad externa SYS21: ÚNICA por (id_emp, origen_nomina); parcial para permitir
+-- múltiples manuales (id_emp NULL). Es la clave de conflicto del upsert del sync.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_trabajadores_id_emp
+    ON trabajadores(id_emp, origen_nomina) WHERE id_emp IS NOT NULL;
+
+-- ── sync_estado / fotos_pendientes (employee_monitoring) ──
+CREATE INDEX IF NOT EXISTS idx_sync_estado_empresa
+    ON sync_estado(id_empresa);
+CREATE INDEX IF NOT EXISTS idx_fotos_pend_empresa_estado
+    ON fotos_pendientes(id_empresa, estado);
+CREATE INDEX IF NOT EXISTS idx_fotos_pend_emp
+    ON fotos_pendientes(id_emp, origen_nomina);
 
 -- ── embeddings (HNSW afinado) ──
 -- m / ef_construction más altos = mejor recall a costa de tiempo de build.

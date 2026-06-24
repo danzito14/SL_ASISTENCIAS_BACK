@@ -14,6 +14,8 @@ class AreaTrabajo(Base):
     id_area     = Column(Integer, primary_key=True, autoincrement=True)
     nombre_area = Column(String(100), nullable=False)
     id_empresa  = Column(Integer)
+    # Clasificación del área para el sync: 'oficina' | 'empaque' | 'campo'.
+    tipo_area   = Column(String(20), nullable=True, default=None)
     estado      = Column(String(10), default="activo")
     # (Otras columnas —ubicacion/hora_entrada/...— las maneja tenancy; aquí no se necesitan.)
 
@@ -22,9 +24,9 @@ class Trabajador(Base):
     __tablename__ = "trabajadores"
 
     id_trabajador = Column(Integer, primary_key=True, autoincrement=True)
-    # Identidad EXTERNA en la nómina SYS21: la pobla el sync de employee_monitoring.
-    # NULL en los trabajadores que workers crea manualmente. (Aquí solo se mapea la
-    # columna para que el ORM no la ignore; workers no la gestiona.)
+    # Identidad EXTERNA en la nómina SYS21 (la sincroniza employee_monitoring).
+    # NULL en trabajadores creados manualmente vía workers. (id_emp, origen_nomina)
+    # es único (índice parcial) y es la clave de conflicto del upsert del sync.
     id_emp = Column(String(50), nullable=True, default=None)
     origen_nomina = Column(String(30), nullable=True, default=None)
     nombre = Column(String(100), nullable=False)

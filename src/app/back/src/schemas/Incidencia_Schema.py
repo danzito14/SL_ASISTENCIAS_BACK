@@ -74,3 +74,7 @@ class EventoResponse(BaseModel):
     similitud:         float | None = None       # solo intentos
     tiene_foto:        bool = False
     foto_url:          str | None = None         # ej. "/incidencias/<uuid>/foto" | "/intentos/<uuid>/foto"
+    # Escaneo que originó la incidencia (UUID → escaneos.id_escaneo). Permite pedir
+    # GET /escaneos/{id} para la info completa. Solo en filas 'incidencia' nacidas de
+    # un escaneo; en 'intento' (acceso fallido, sin escaneo) va en None.
+    id_escaneo_ref:    UUID | None = None

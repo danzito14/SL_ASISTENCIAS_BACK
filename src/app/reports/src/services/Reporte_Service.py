@@ -160,12 +160,16 @@ class ReporteService:
                 "fecha": i.fecha,
                 "estado": i.estado,
                 "descripcion": i.descripcion,
+                # Escaneo que originó la incidencia → el front puede pedir
+                # GET /escaneos/{id} para la info completa. NULL si no aplica.
+                "escaneo_ref": i.id_escaneo_ref,
             }
             for i, t in q.order_by(Incidencia.fecha.desc(), Incidencia.id_incidencia.desc()).all()
         ]
         columnas = [
             ("id", "ID"), ("trabajador", "Trabajador"), ("tipo", "Tipo"),
             ("fecha", "Fecha"), ("estado", "Estado"), ("descripcion", "Descripción"),
+            ("escaneo_ref", "Escaneo (ID)"),
         ]
         return self._exportar(columnas, filas, "incidencias", formato)
 
