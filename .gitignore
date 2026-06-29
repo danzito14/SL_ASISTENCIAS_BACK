@@ -60,7 +60,6 @@ Thumbs.db
 
 # Uploads and generated files
 uploads/
-media/
 staticfiles/
 
 # Jupyter

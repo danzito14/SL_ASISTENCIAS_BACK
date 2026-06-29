@@ -1,0 +1,6 @@
+# media — dependencias mínimas (sin BD, sin visión/IA).
+fastapi==0.115.0
+uvicorn==0.30.6
+gunicorn==23.0.0
+pydantic-settings==2.5.2
+python-dotenv==1.0.1
