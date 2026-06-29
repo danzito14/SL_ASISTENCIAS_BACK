@@ -371,8 +371,8 @@ services:
       DEBUG: "false"
       CORS_ORIGINS: ${CORS_ORIGINS}
       EMPRESA_ADMIN: "99"
-      GATEWAY_INTERNAL_TOKEN: ""   # PRUEBA: vacío = no exige X-Gateway-Token (restaurar en prod)
-      AUTH_DISABLED: "true"        # PRUEBA: sin auth (principal admin). QUITAR en prod.
+      # Anti-bypass del gateway: debe coincidir con el middleware gateway-token.
+      GATEWAY_INTERNAL_TOKEN: ${GATEWAY_INTERNAL_TOKEN:-CAMBIAR_gateway_token}
       RECOGNITION_SERVICE_URL: "http://recognition:8000"
       RECOGNITION_INTERNAL_TOKEN: ${RECOGNITION_INTERNAL_TOKEN}
       # Nómina SYS21 (origen de empleados)
@@ -391,8 +391,11 @@ services:
       SYNC_CRON_COM: ${SYNC_CRON_COM:-2,14}            # comercial 02:00 y 14:00
       SYNC_CRON_AGRICOLA: ${SYNC_CRON_AGRICOLA:-3,15}  # agrícola 03:00 y 15:00
       SYNC_COM_TEST_INTERVAL_MIN: ${SYNC_COM_TEST_INTERVAL_MIN:-0}  # 0 = cron normal (prod); >0 = comercial cada N min (prueba)
-    ports:
-      - "8010:8000"        # PRUEBA: /docs y API en http://localhost:8010 (quitar en prod)
+    # Sin 'ports': es INTERNO (sync por scheduler + admin). El scheduler corre solo
+    # (cron interno, sin HTTP). Para exponer /emp_sync por el gateway, descomenta las
+    # labels traefik de abajo. Para depurar local, descomenta el port temporalmente.
+    # ports:
+    #   - "8010:8000"
     volumes:
       # Carpeta de secretos (read-only). En Docker Desktop/Windows montar la CARPETA
       # es más confiable que un bind-mount de un solo archivo. La llave queda en
