@@ -1,11 +1,11 @@
 # employee_monitoring/routers/Sync_Router.py
 """
-API del servicio de monitoreo. Prefijo propio /sync (no colisiona con los
-endpoints públicos /trabajadores y /embeddings, que son de workers).
+API del servicio de monitoreo. Prefijo propio /emp_sync (employee sync): no
+colisiona con /trabajadores ni /embeddings (workers) ni con /off_sync (offline_sync).
 
-Scopes (derivados del primer segmento del path → recurso 'sync'):
-  - GET  → sync:read
-  - POST/PATCH → sync:write
+Scopes (derivados del primer segmento del path → recurso 'emp_sync'):
+  - GET  → emp_sync:read
+  - POST/PATCH → emp_sync:write
 """
 import logging
 
@@ -23,7 +23,7 @@ from src.sync.Sync_Service import sync_service
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/sync", tags=["Sync"])
+router = APIRouter(prefix="/emp_sync", tags=["Sync"])
 
 
 def _correr_sync_async(origenes: list[str] | None, solo_datos: bool) -> None:
@@ -33,6 +33,17 @@ def _correr_sync_async(origenes: list[str] | None, solo_datos: bool) -> None:
         sync_service.ejecutar_sync(db, disparado_por="manual", origenes=origenes, solo_datos=solo_datos)
     except Exception:  # noqa: BLE001
         logger.exception("Sync manual falló")
+    finally:
+        db.close()
+
+
+def _correr_fotos_async(origenes: list[str] | None, limite: int | None, forzar: bool) -> None:
+    """Procesa solo fotos con su propia sesión (para BackgroundTasks)."""
+    db = SessionLocal()
+    try:
+        sync_service.ejecutar_fotos(db, origenes=origenes, limite=limite, forzar=forzar)
+    except Exception:  # noqa: BLE001
+        logger.exception("Procesamiento de fotos falló")
     finally:
         db.close()
 
@@ -52,6 +63,26 @@ def lanzar_sync(
     origenes = [origen] if origen else None
     background.add_task(_correr_sync_async, origenes, solo_datos)
     return SyncRunAceptado()
+
+
+@router.post(
+    "/fotos",
+    status_code=status.HTTP_202_ACCEPTED,
+    response_model=SyncRunAceptado,
+    summary="Procesar SOLO fotos de los trabajadores ya registrados",
+)
+def lanzar_fotos(
+    background: BackgroundTasks,
+    origen: str | None = Query(None, description="Origen único (ej. 'agricola'). Vacío = todos."),
+    limite: int | None = Query(None, description="Procesar a lo más N por origen (útil para pruebas)."),
+    forzar: bool = Query(False, description="Reprocesar aunque la foto no haya cambiado (mtime/size)."),
+    usuario: Principal = Depends(usuario_actual),
+):
+    origenes = [origen] if origen else None
+    background.add_task(_correr_fotos_async, origenes, limite, forzar)
+    return SyncRunAceptado(
+        mensaje="Procesamiento de fotos lanzado en segundo plano. Revisa /sync/fotos-pendientes y los logs."
+    )
 
 
 @router.get(

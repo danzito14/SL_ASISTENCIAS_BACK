@@ -50,6 +50,14 @@ class _Pendiente:
     size: int | None
 
 
+@dataclass
+class _FotoCandidato:
+    """Trabajador YA registrado, para el endpoint dedicado de fotos (/sync/fotos).
+    Lo consume _procesar_fotos, que solo necesita id_emp e id_empresa."""
+    id_emp: str
+    id_empresa: int | None
+
+
 class SyncService:
 
     def ejecutar_sync(
@@ -91,6 +99,54 @@ class SyncService:
         )
         return resumen
 
+    # ── Endpoint dedicado: SOLO fotos de trabajadores ya registrados ──────────
+    def ejecutar_fotos(
+        self,
+        db: Session,
+        origenes: list[str] | None = None,
+        limite: int | None = None,
+        forzar: bool = False,
+    ) -> SyncRunResponse:
+        """
+        Procesa SOLO las fotos de los trabajadores YA registrados (no re-lee SYS21).
+
+        Args:
+            origenes: orígenes a procesar (None = todos los configurados).
+            limite:   procesar a lo más N por origen (útil para pruebas).
+            forzar:   ignora el estado previo de la foto (reprocesa aunque no haya
+                      cambiado mtime/size); útil para recalibrar umbrales.
+        """
+        inicio = datetime.now(timezone.utc)
+        objetivos = origenes or list(settings.sys21_urls.keys())
+        resumen = SyncRunResponse(disparado_por="fotos", solo_datos=False, inicio=inicio)
+
+        for origen in objetivos:
+            r = SyncOrigenResultado(origen=origen)
+            try:
+                registrados = bulk_service.cargar_registrados(db, origen, limite=limite)
+                candidatos = [_FotoCandidato(id_emp=row.id_emp, id_empresa=row.id_empresa) for row in registrados]
+                id_trab_map = {(row.id_emp, origen): row.id_trabajador for row in registrados}
+                estado_prev = {} if forzar else bulk_service.cargar_estado(db, origen)
+                r.leidos = len(candidatos)
+                self._procesar_fotos(db, origen, candidatos, id_trab_map, estado_prev, r)
+            except Exception as exc:  # noqa: BLE001 — un origen no debe tumbar al otro
+                db.rollback()
+                r.ok = False
+                r.detalle_error = str(exc)
+                logger.exception("Fotos[%s] falló: %s", origen, exc)
+            resumen.por_origen.append(r)
+            self._acumular(resumen, r)
+
+        fin = datetime.now(timezone.utc)
+        resumen.fin = fin
+        resumen.duracion_seg = round((fin - inicio).total_seconds(), 2)
+        resumen.mensaje = "Procesamiento de fotos completado."
+        logger.info(
+            "Fotos listo en %.1fs: %d candidatos, %d fotos ok, %d pendientes, %d errores.",
+            resumen.duracion_seg, resumen.leidos, resumen.fotos_ok, resumen.fotos_pendientes, resumen.errores,
+        )
+        return resumen
+
     # ── Por origen ────────────────────────────────────────────────────────────
     def _sincronizar_origen(
         self,
@@ -102,6 +158,10 @@ class SyncService:
     ) -> None:
         bulk_service.resetear_visto(db, origen)
         estado_prev = bulk_service.cargar_estado(db, origen)
+        # Trabajadores que YA existen (id_emp poblado). Si un empleado está en
+        # sync_estado pero su trabajador ya no existe (p.ej. borrado en cascada al
+        # eliminar un área), hay que re-insertarlo aunque su hash no haya cambiado.
+        ya_registrados = bulk_service.cargar_id_trabajadores(db, origen)
         ahora = datetime.now(timezone.utc)
 
         mapeados: list[mapping.TrabajadorMapeado] = []
@@ -123,7 +183,8 @@ class SyncService:
             clave = (mapeado.id_emp, origen)
             h = hashing.hash_datos(mapeado.as_trabajador_dict())
             prev = estado_prev.get(clave)
-            if prev is None:
+            if prev is None or clave not in ya_registrados:
+                # Nuevo, o huérfano (en sync_estado pero sin trabajador) → re-insertar.
                 r.nuevos += 1
                 filas_trab.append(mapeado.as_trabajador_dict())
             elif prev["hash_datos"] != h:
@@ -245,7 +306,7 @@ class SyncService:
                         self._actualizar_estado_foto(db, p.mapeado.id_emp, origen, "pendiente",
                                                      p.hash_foto, p.mtime, p.size)
                         self._registrar_pendiente(db, p.mapeado.id_emp, origen, p.mapeado.id_empresa,
-                                                  p.id_trabajador, motivo)
+                                                  p.id_trabajador, motivo, detalle=self._metricas_detalle(res))
                         r.fotos_pendientes += 1
                         continue
 
@@ -268,14 +329,30 @@ class SyncService:
             return "recognition_no_disponible"
         if res.get("estado") == "no_rostro":
             return "no_rostro"
+        # Una sola cara (si hay 2+, recognition tomó la más grande → ambiguo).
+        if settings.FOTO_EXIGIR_UNA_CARA and (res.get("num_caras") or 1) > 1:
+            return "multiples_caras"
+        # Cara bien detectada.
+        if (res.get("det_score") or 0) < settings.FOTO_DET_SCORE_MIN:
+            return "det_score_bajo"
+        # Cara suficientemente grande (no lejana).
+        if (res.get("face_ratio") or 0) < settings.FOTO_MIN_FACE_RATIO:
+            return "cara_pequena"
+        # Pose frontal. pose = [pitch, yaw, roll] (InsightFace); si no viene, se omite.
+        pose = res.get("pose")
+        if pose and len(pose) >= 2:
+            if abs(pose[0]) > settings.FOTO_MAX_PITCH or abs(pose[1]) > settings.FOTO_MAX_YAW:
+                return "pose_no_frontal"
+        # Nitidez (varianza del Laplaciano).
+        if (res.get("blur") or 0) < settings.FOTO_BLUR_MIN:
+            return "borrosa"
+        # Anti-spoofing (hoy NO exigido; activar FOTO_EXIGIR_ANTISPOOF cuando esté listo).
         if settings.FOTO_EXIGIR_ANTISPOOF:
             if not res.get("es_real"):
                 return "spoofing"
             anti = res.get("antispoof")
             if anti is not None and not anti.get("es_real"):
                 return "spoofing"
-        if (res.get("det_score") or 0) < settings.FOTO_DET_SCORE_MIN:
-            return "det_score_bajo"
         # Anti-duplicado por empresa (excluye al propio trabajador para recapturas).
         dup = embedding_service.buscar_duplicado(
             res["embedding"], db, excluir_id_trabajador=id_trab, id_empresa=id_empresa
@@ -305,6 +382,16 @@ class SyncService:
             update(SyncEstado)
             .where(SyncEstado.id_emp == id_emp, SyncEstado.origen_nomina == origen)
             .values(**valores)
+        )
+
+    @staticmethod
+    def _metricas_detalle(res: dict | None) -> str | None:
+        """Resumen de las señales medidas (para calibrar umbrales desde fotos_pendientes)."""
+        if not res:
+            return None
+        return (
+            f"det_score={res.get('det_score')} num_caras={res.get('num_caras')} "
+            f"face_ratio={res.get('face_ratio')} blur={res.get('blur')} pose={res.get('pose')}"
         )
 
     def _registrar_pendiente(self, db: Session, id_emp: str, origen: str, id_empresa: int | None,

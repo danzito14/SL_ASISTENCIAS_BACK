@@ -12,7 +12,7 @@ Devuelve (ok, motivo): si ok es False, motivo es uno canónico de FotoPendiente.
 import io
 import logging
 
-from PIL import Image
+from PIL import Image, ImageStat
 
 from src.core.config import settings
 
@@ -43,5 +43,12 @@ def validar_foto_local(foto_bytes: bytes | None) -> tuple[bool, str | None]:
     ancho, alto = img.size
     if ancho < settings.FOTO_MIN_WIDTH or alto < settings.FOTO_MIN_HEIGHT:
         return False, "resolucion_baja"
+
+    # 4) Brillo: ni muy oscura ni quemada (promedio en escala de grises 0-255).
+    brillo = ImageStat.Stat(img.convert("L")).mean[0]
+    if brillo < settings.FOTO_BRILLO_MIN:
+        return False, "muy_oscura"
+    if brillo > settings.FOTO_BRILLO_MAX:
+        return False, "muy_clara"
 
     return True, None

@@ -54,6 +54,9 @@ BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'svc_reports') THEN
         CREATE ROLE svc_reports     LOGIN PASSWORD 'CAMBIAR_reports'     CONNECTION LIMIT 10;
     END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'svc_offline') THEN
+        CREATE ROLE svc_offline     LOGIN PASSWORD 'CAMBIAR_offline'     CONNECTION LIMIT 15;
+    END IF;
     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'app_cron') THEN
         CREATE ROLE app_cron        LOGIN PASSWORD 'CAMBIAR_cron'        CONNECTION LIMIT 5;
     END IF;
@@ -62,7 +65,7 @@ END $$;
 -- USAGE del esquema para todos los roles de servicio.
 GRANT USAGE ON SCHEMA public TO
     svc_identity, svc_tenancy, svc_workers, svc_recognition,
-    svc_access, svc_reports, app_cron;
+    svc_access, svc_reports, svc_offline, app_cron;
 
 
 -- ════════════════════════════════════════════════════════════════════════════
@@ -125,6 +128,30 @@ GRANT USAGE, SELECT ON SEQUENCE
     sync_estado_id_sync_seq,
     fotos_pendientes_id_pendiente_seq
     TO svc_workers;
+
+
+-- ════════════════════════════════════════════════════════════════════════════
+-- 4b) OFFLINE_SYNC  — roster para el APK (lectura) + ingesta de eventos offline +
+--     enrolamiento walk-in (alta de rostros que NO están en SYS21)
+-- ────────────────────────────────────────────────────────────────────────────
+-- Sirve al APK kiosko. Baja el roster (trabajadores+embeddings+áreas+puertas),
+-- recibe asistencias/intentos por lotes (INSERT idempotente ON CONFLICT) y enrola
+-- walk-in (upsert de trabajadores/embeddings con id_emp=UUID, origen 'apk').
+-- ════════════════════════════════════════════════════════════════════════════
+-- Roster (solo lectura) + cruzados a tenancy:
+GRANT SELECT ON
+    trabajadores, embeddings, area_trabajo, puertas_acceso, empresas
+    TO svc_offline;
+-- Enrolamiento walk-in: upsert de trabajadores/embeddings.
+GRANT INSERT, UPDATE ON trabajadores, embeddings TO svc_offline;
+GRANT USAGE, SELECT ON SEQUENCE
+    trabajadores_id_trabajador_seq,
+    embeddings_id_embedding_seq
+    TO svc_offline;
+-- Ingesta de eventos (SELECT por el RETURNING que cuenta insertados vs duplicados).
+GRANT SELECT, INSERT ON asistencia, intentos_acceso TO svc_offline;
+-- Por si una fila llega sin UUID (normalmente lo genera el dispositivo).
+GRANT EXECUTE ON FUNCTION gen_uuid_v7() TO svc_offline;
 
 
 -- ════════════════════════════════════════════════════════════════════════════

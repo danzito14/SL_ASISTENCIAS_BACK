@@ -19,7 +19,8 @@ class IntentoAccesoResponse(BaseModel):
     ruta_foto:     str | None = None
     fecha:         datetime | None = None
 
-    # Nombre resuelto por el backend (JOIN) cuando el intento tiene trabajador.
+    # Identidad/nombre resueltos por el backend (JOIN) cuando el intento tiene trabajador.
+    id_emp:            str | None = None   # número de empleado (SYS21), para mostrar
     trabajador_nombre: str | None = None
 
     model_config = {"from_attributes": True}

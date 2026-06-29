@@ -1,0 +1,12 @@
+# offline_sync — roster (solo lectura) + ingesta por lotes (CSV) + enrolamiento
+# walk-in (JSON con embedding ya calculado en el APK). Sin visión/IA ni ODBC.
+fastapi==0.115.0
+uvicorn==0.30.6
+gunicorn==23.0.0
+SQLAlchemy==2.0.50
+pgvector==0.4.2
+psycopg2-binary==2.9.10
+pydantic==2.9.2
+pydantic-settings==2.5.2
+python-dotenv==1.0.1
+python-multipart==0.0.30

@@ -9,6 +9,9 @@ venv/
 env/
 ENV/
 
+fotos_spike/
+pruebas_offline_sync/
+
 # Distribution / packaging
 build/
 dist/
@@ -70,3 +73,10 @@ temp/
 
 # Docker
 docker-compose.override.yml
+
+# Secretos — llaves SSH/privadas (NUNCA commitear). La carpeta secrets/ se monta
+# en el contenedor con la llave del SFTP de fotos.
+src/docker/secrets/
+*.pem
+*_ssh_key
+*_ssh_key.pub

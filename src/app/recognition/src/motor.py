@@ -67,14 +67,45 @@ class Motor:
             spoof_score = float(raw_spoof)
             es_real = spoof_score > SPOOFING_UMBRAL
         kps = cara.kps.tolist() if getattr(cara, "kps", None) is not None else None
+        bbox = cara.bbox.astype(int).tolist()
+
+        # Señales de CALIDAD para validar fotos de enrolamiento (las usa /extraer):
+        #   num_caras  → cuántas caras se detectaron (para exigir UNA sola)
+        #   face_ratio → área de la cara / área de la imagen (cara no muy lejana)
+        #   pose       → [pitch, yaw, roll] en grados (frontalidad), o None
+        #   blur       → varianza del Laplaciano (mayor = más nítida)
+        h, w = frame.shape[:2]
+        fx1, fy1, fx2, fy2 = bbox
+        face_area = max(0, fx2 - fx1) * max(0, fy2 - fy1)
+        face_ratio = float(face_area) / float(max(w * h, 1))
+        pose_attr = getattr(cara, "pose", None)
+        pose = [float(p) for p in pose_attr.tolist()] if pose_attr is not None else None
         return {
             "embedding": embedding,
-            "bbox": cara.bbox.astype(int).tolist(),
+            "bbox": bbox,
             "kps": kps,
             "det_score": float(cara.det_score),
             "spoof_score": spoof_score,
             "es_real": es_real,
+            "num_caras": len(faces),
+            "frame_w": int(w),
+            "frame_h": int(h),
+            "face_ratio": face_ratio,
+            "pose": pose,
+            "blur": self._nitidez(frame, bbox),
         }
+
+    def _nitidez(self, frame: np.ndarray, bbox) -> float:
+        """Varianza del Laplaciano sobre el recorte de la cara (mayor = más nítida)."""
+        h, w = frame.shape[:2]
+        x1, y1, x2, y2 = (int(v) for v in bbox)
+        x1, y1 = max(0, x1), max(0, y1)
+        x2, y2 = min(w, x2), min(h, y2)
+        crop = frame[y1:y2, x1:x2]
+        if crop.size == 0:
+            crop = frame
+        gris = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+        return float(cv2.Laplacian(gris, cv2.CV_64F).var())
 
     def buscar_en_bd(self, embedding: list[float], db: Session,
                      id_empresa: int | None = None, id_area: int | None = None) -> dict | None:

@@ -123,6 +123,24 @@ class BulkService:
         ).all()
         return {(f.id_emp, origen): f.id_trabajador for f in filas}
 
+    def cargar_registrados(self, db: Session, origen: str, limite: int | None = None) -> list:
+        """
+        Trabajadores ACTIVOS ya registrados de un origen, con (id_emp, id_empresa,
+        id_trabajador). Para el endpoint dedicado de fotos (/sync/fotos).
+        """
+        q = (
+            select(Trabajador.id_emp, Trabajador.id_empresa, Trabajador.id_trabajador)
+            .where(
+                Trabajador.origen_nomina == origen,
+                Trabajador.id_emp.isnot(None),
+                Trabajador.estado == "activo",
+            )
+            .order_by(Trabajador.id_trabajador)
+        )
+        if limite:
+            q = q.limit(limite)
+        return db.execute(q).all()
+
     def upsert_sync_estado(
         self,
         db: Session,

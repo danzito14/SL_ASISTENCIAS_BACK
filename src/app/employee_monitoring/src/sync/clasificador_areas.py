@@ -84,8 +84,69 @@ OVERRIDE_POR_DEPARTAMENTO_COM: dict[str, dict] = {
     # qué departamentos/puestos cuentan como administradores (hoy oficina = 'general').
 }
 
-# ── Agrícola: puesto → grupo (TODO: el usuario pasará la tabla de puestos). ─────
-GRUPO_POR_PUESTO_AGRICOLA: dict[str, str] = {}
+# ── Agrícola: PUESTO (ViewBI_Puestos.nombre) → grupo. Claves NORMALIZADAS. ──────
+GRUPO_POR_PUESTO_AGRICOLA: dict[str, str] = {
+    # oficina (administrativo)
+    "administrativo": "oficina",
+    "auxiliar administrativo": "oficina",
+    "administracion": "oficina",
+    "auxiliar-sistemas": "oficina",
+    "auxiliar nominas": "oficina",
+    "aux. de nomina": "oficina",
+    "aux contable": "oficina",
+    "auxiliar imss (prefiliar)": "oficina",
+    "seguridad y salud": "oficina",
+    "trabajadora social": "oficina",
+    "trabajador social aux": "oficina",
+    "mensajero": "oficina",
+    "asesora educativa": "oficina",
+    "practicante": "oficina",
+    "monitoreo": "oficina",
+    "aux inocuidad": "oficina",
+    # empaque
+    "empaque": "empaque",
+    "almacen empaque": "empaque",
+    "montacarguista almacen": "empaque",
+    "guardia empaque": "empaque",
+    "escaneador": "empaque",
+    # Ambiguo (lo dejó el usuario en empaque): si su función es revisar producto
+    # ANTES de empaque → empaque; si no, debería ir en campo.
+    "revisador caco campo": "empaque",
+    "vaciadores": "empaque",
+    # campo
+    "jornalero": "campo",
+    "cuadrillero": "campo",
+    "chofer": "campo",
+    "mantenimiento": "campo",
+    "produccion": "campo",
+    "operador": "campo",
+    "mayordomo": "campo",
+    "apuntador": "campo",
+    "campero": "campo",
+    "malleros": "campo",
+    "ninera": "campo",
+    "cocinera": "campo",
+    "portero": "campo",
+    "campo": "campo",
+    "auxiliar de corte": "campo",
+    "supervisor corte-chile": "campo",
+    "jardinero": "campo",
+    "mantenimiento albergue": "campo",
+    "mantenimiento electrico": "campo",
+    "supervisor campo natoches": "campo",
+    "guardia": "campo",
+    "aux. mantenimiento": "campo",
+    "enc de motor de riego carcamo": "campo",
+    "carcamo riego": "campo",
+    "caco-velador": "campo",
+    "fuguero caco campo": "campo",
+    "canalero": "campo",
+    "enc. de sistemas de riego": "campo",
+    "aplicador de herbicida": "campo",
+    "aux. de riego": "campo",
+    "monitoreo caco campo": "campo",
+    "aplicador de fungicida": "campo",
+}
 OVERRIDE_POR_PUESTO_AGRICOLA: dict[str, dict] = {}
 
 # Mapa de reglas por origen.

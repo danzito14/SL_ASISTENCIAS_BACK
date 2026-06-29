@@ -9,16 +9,11 @@ global:
 
 # ── Puntos de entrada ─────────────────────────────────────────────────────────
 entryPoints:
+  # Traefik es INTERNO (HTTP) detrás del nginx del host. No termina TLS ni hace
+  # redirect: el nginx ya sirve HTTPS para sl-asistencias.slagricola.cloud y hace
+  # reverse-proxy a este entrypoint. Solo se publica en 127.0.0.1 (ver compose).
   web:
     address: ":80"
-    # Cuando tengas dominio + TLS, fuerza HTTPS descomentando:
-    # http:
-    #   redirections:
-    #     entryPoint:
-    #       to: websecure
-    #       scheme: https
-  websecure:
-    address: ":443"
 
 # ── Dashboard (se publica SOLO en localhost vía el binding 127.0.0.1:8080) ─────
 api:
@@ -40,16 +35,9 @@ providers:
     filename: /etc/traefik/dynamic.yml
     watch: true
 
-# ── TLS automático (Let's Encrypt) ────────────────────────────────────────────
-# Requiere dominio público + puerto 80 abierto. Al activarlo, en cada router usa
-# una regla con Host(`tu.dominio`) y añade la label tls.certresolver=le.
-# certificatesResolvers:
-#   le:
-#     acme:
-#       email: tu-correo@dominio.com
-#       storage: /letsencrypt/acme.json
-#       httpChallenge:
-#         entryPoint: web
+# ── TLS ───────────────────────────────────────────────────────────────────────
+# Lo termina el NGINX del host (varios sitios comparten :80/:443 con certbot).
+# Traefik NO hace ACME ni bind 80/443; recibe HTTP del nginx por 127.0.0.1:8090.
 
 log:
   level: DEBUG

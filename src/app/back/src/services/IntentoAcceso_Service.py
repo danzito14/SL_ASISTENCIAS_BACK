@@ -21,6 +21,7 @@ class IntentoAccesoService:
     def _enriquecer(self, intento: IntentoAcceso) -> IntentoAcceso:
         """Rellena el nombre del trabajador (transitorio) si el intento tiene uno."""
         trab = intento.trabajador
+        intento.id_emp = trab.id_emp if trab else None
         intento.trabajador_nombre = f"{trab.nombre} {trab.apellido}" if trab else None
         return intento
 

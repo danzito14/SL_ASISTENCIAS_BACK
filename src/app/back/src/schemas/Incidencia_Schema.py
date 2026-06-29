@@ -48,7 +48,8 @@ class IncidenciaResponse(IncidenciaBase):
     id_empresa:     int | None = None
     fecha_creacion: datetime
 
-    # Nombre resuelto por el backend (JOIN) para que el front no consulte /trabajadores.
+    # Identidad/nombre resueltos por el backend (JOIN) para que el front no consulte /trabajadores.
+    id_emp:            str | None = None   # número de empleado (SYS21), para mostrar
     trabajador_nombre: str | None = None
 
     model_config = {"from_attributes": True}
@@ -68,6 +69,7 @@ class EventoResponse(BaseModel):
     descripcion:       str | None = None
     estado:            str | None = None        # solo incidencias (intentos = None)
     id_trabajador:     int | None = None
+    id_emp:            str | None = None        # número de empleado (SYS21), para mostrar
     trabajador_nombre: str | None = None
     id_puerta:         int | None = None        # solo intentos
     id_empresa:        int | None = None

@@ -10,6 +10,14 @@ http:
         burst: 50      # ráfaga permitida por encima del promedio
         period: 1s
 
+    # Recorta el prefijo /api que mandan el front web y el APK, para que los
+    # microservicios (que sirven rutas peladas: /usuarios, /off_sync, …) respondan
+    # en la MISMA URL que el monolito v1. Si la ruta no trae /api, no toca nada.
+    api-strip:
+      stripPrefix:
+        prefixes:
+          - "/api"
+
     # Cabeceras de seguridad básicas para todas las respuestas.
     secure-headers:
       headers:

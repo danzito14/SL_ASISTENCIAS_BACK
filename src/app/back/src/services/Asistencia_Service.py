@@ -54,6 +54,7 @@ class AsistenciaService:
         """Rellena los nombres resueltos (transitorios) que lee AsistenciaResponse."""
         trab = a.trabajador
         area = trab.area if trab else None
+        a.id_emp             = trab.id_emp if trab else None
         a.trabajador_nombre  = f"{trab.nombre} {trab.apellido}" if trab else None
         a.puerta_nombre      = a.puerta.nombre_puerta if a.puerta else None
         a.dispositivo_nombre = a.dispositivo.nombre_dispositivo if a.dispositivo else None

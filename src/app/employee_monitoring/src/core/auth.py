@@ -104,6 +104,15 @@ def guard_scopes(request: Request) -> None:
     if request.method == "OPTIONS" or _es_publica(path):
         return
 
+    # DEV/PRUEBA: sin auth. Inyecta un principal super-admin para poder llamar los
+    # endpoints sin headers del gateway (Swagger/curl directo). NUNCA en producción.
+    if settings.AUTH_DISABLED:
+        request.state.principal = Principal(
+            id_usuario=0, empresa=settings.EMPRESA_ADMIN, scopes=["*"],
+            rol="dev", nombre_usuario="dev",
+        )
+        return
+
     _verificar_gateway(request)
     principal = _principal_desde_headers(request)
 

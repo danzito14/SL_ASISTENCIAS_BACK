@@ -119,7 +119,10 @@ def extraer(foto: UploadFile = File(...)):
             return {"estado": "no_rostro"}
         anti = motor.evaluar_antispoof(frame, cara)
         return {"estado": "ok", "embedding": cara["embedding"], "det_score": cara["det_score"],
-                "es_real": cara["es_real"], "spoof_score": cara["spoof_score"], "antispoof": anti}
+                "es_real": cara["es_real"], "spoof_score": cara["spoof_score"], "antispoof": anti,
+                # Señales de calidad para validación de enrolamiento:
+                "num_caras": cara["num_caras"], "face_ratio": cara["face_ratio"],
+                "pose": cara["pose"], "blur": cara["blur"]}
 
 
 # ── 4. Identificar (1 imagen): solo match, sin registrar ──────────────────────

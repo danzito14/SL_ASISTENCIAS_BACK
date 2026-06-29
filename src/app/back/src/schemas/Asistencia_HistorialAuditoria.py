@@ -31,8 +31,9 @@ class AsistenciaResponse(AsistenciaBase):
     fecha_hora:     datetime
     fecha_creacion: datetime
 
-    # Nombres resueltos por el backend (JOIN) para que el front muestre todo sin
-    # consultar /trabajadores, /puertas, /areas, /empresas ni pedir esos scopes.
+    # Identidad/nombres resueltos por el backend (JOIN) para que el front muestre todo
+    # sin consultar /trabajadores, /puertas, /areas, /empresas ni pedir esos scopes.
+    id_emp:             str | None = None   # número de empleado (SYS21) del trabajador, para MOSTRAR
     trabajador_nombre:  str | None = None
     puerta_nombre:      str | None = None
     dispositivo_nombre: str | None = None

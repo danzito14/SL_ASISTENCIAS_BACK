@@ -1232,6 +1232,8 @@ INSERT INTO roles (nombre_rol, descripcion, permisos, estado) VALUES
         '{"scopes": ["*"]}'::jsonb, 'activo'),
     ('kiosko',        'Dispositivo/kiosko: solo scanner:use.',
         '{"scopes": ["scanner:use"]}'::jsonb, 'activo'),
+    ('escaneador',    'Kiosko + gestión de trabajadores y rostros (enrola/edita/elige trabajador y le pone rostro).',
+        '{"scopes": ["scanner:use", "trabajadores:read", "trabajadores:write", "embeddings:read", "embeddings:write", "areas:read"]}'::jsonb, 'activo'),
     ('usuarios_consulta', 'Ver usuarios.',
         '{"scopes": ["usuarios:read"]}'::jsonb, 'activo'),
     ('usuarios_gestion',  'Ver + crear/editar usuarios.',

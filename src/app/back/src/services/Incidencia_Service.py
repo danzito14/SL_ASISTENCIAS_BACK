@@ -64,6 +64,7 @@ class IncidenciaService:
     def _enriquecer(self, i: Incidencia) -> Incidencia:
         """Rellena el nombre resuelto (transitorio) que lee IncidenciaResponse."""
         trab = i.trabajador
+        i.id_emp = trab.id_emp if trab else None
         i.trabajador_nombre = f"{trab.nombre} {trab.apellido}" if trab else None
         return i
 
@@ -217,6 +218,7 @@ class IncidenciaService:
                     "descripcion": i.descripcion,
                     "estado": i.estado,
                     "id_trabajador": i.id_trabajador,
+                    "id_emp": trab.id_emp if trab else None,
                     "trabajador_nombre": f"{trab.nombre} {trab.apellido}" if trab else None,
                     "id_puerta": None,
                     "id_empresa": None,
@@ -255,6 +257,7 @@ class IncidenciaService:
                     "descripcion": desc,
                     "estado": None,
                     "id_trabajador": t.id_trabajador,
+                    "id_emp": trab.id_emp if trab else None,
                     "trabajador_nombre": f"{trab.nombre} {trab.apellido}" if trab else None,
                     "id_puerta": t.id_puerta,
                     "id_empresa": t.id_empresa,

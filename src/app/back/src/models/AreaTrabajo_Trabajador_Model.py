@@ -34,6 +34,11 @@ class Trabajador(Base):
     __tablename__ = "trabajadores"
 
     id_trabajador = Column(Integer, primary_key=True, autoincrement=True)
+    # Identidad EXTERNA en la nómina SYS21 (la pobla employee_monitoring). Es lo que
+    # el front muestra como "número de empleado". NULL en altas manuales; único solo
+    # junto con origen_nomina.
+    id_emp = Column(String(50), nullable=True, default=None)
+    origen_nomina = Column(String(30), nullable=True, default=None)
     nombre = Column(String(100), nullable=False)
     apellido = Column(String(100), nullable=False)
     id_area = Column(Integer, ForeignKey("area_trabajo.id_area"), nullable=False)

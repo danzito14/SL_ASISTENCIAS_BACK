@@ -83,6 +83,11 @@ class TrabajadorUpdate(BaseModel):
 
 class TrabajadorResponse(TrabajadorBase):
     id_trabajador: int
+    # Identidad EXTERNA (nómina SYS21): es lo que el FRONT muestra como "número de
+    # empleado". id_trabajador es la PK interna (FK de asistencias). id_emp puede ser
+    # NULL (trabajadores creados a mano) y solo es único junto con origen_nomina.
+    id_emp: str | None = None
+    origen_nomina: str | None = None
     id_empresa: int | None = None
     fecha_creacion: datetime
     fecha_actualizacion: datetime
@@ -94,6 +99,7 @@ class TrabajadorResponse(TrabajadorBase):
 class TrabajadorBrief(BaseModel):
     """Schema reducido para respuestas embebidas (ej: dentro de Asistencia)"""
     id_trabajador: int
+    id_emp: str | None = None   # número de empleado (SYS21) para mostrar en el front
     nombre: str
     apellido: str
     estado: str

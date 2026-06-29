@@ -49,8 +49,11 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
+    # El WebView del APK (Capacitor) usa origen https://localhost (Android) o
+    # capacitor://localhost (iOS); el APK hace login aquí. Si se activa
+    # CapacitorHttp el CORS ni aplica (HTTP nativo), pero lo dejamos abierto.
     allow_origin_regex=(
-        r"^http://("
+        r"^(https?|capacitor|ionic)://("
         r"localhost"
         r"|127\.0\.0\.1"
         r"|10\.\d{1,3}\.\d{1,3}\.\d{1,3}"
