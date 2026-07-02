@@ -59,6 +59,31 @@ def listar_trabajadores(
     )
 
 
+# ── Buscar trabajadores por número de empleado (id_emp) ───────────────────────
+# NOTA: declarado ANTES de "/{id_trabajador}" para que /trabajadores/buscar no se
+# interprete como un id.
+@router.get(
+    "/buscar",
+    response_model=list[TrabajadorResponse],
+    summary="Buscar trabajadores por número de empleado (id_emp)",
+    description=(
+        "Búsqueda PARCIAL (contiene) por id_emp —el número de empleado externo "
+        "(nómina SYS21) que muestra el front—, con paginación. Devuelve una lista "
+        "porque id_emp no es único por sí solo."
+    ),
+)
+def buscar_trabajadores(
+    id_emp: str = Query(..., min_length=1, description="Número de empleado (SYS21) o parte de él."),
+    id_empresa: int | None = Depends(resolver_empresa_scope),
+    skip: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=500),
+    db: Session = Depends(get_db),
+):
+    return trabajador_service.buscar_por_id_emp(
+        db=db, id_emp=id_emp, skip=skip, limit=limit, id_empresa=id_empresa
+    )
+
+
 # ── Obtener trabajador por id ─────────────────────────────────────────────────
 @router.get(
     "/{id_trabajador}",

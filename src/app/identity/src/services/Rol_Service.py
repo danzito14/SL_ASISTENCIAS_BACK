@@ -1,5 +1,6 @@
 import logging
 
+from sqlalchemy import cast, String
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
 from fastapi import HTTPException, status
@@ -42,6 +43,22 @@ class RolService:
 
     def listar_roles(self, db: Session, skip: int = 0, limit: int = 100) -> list[Rol]:
         return db.query(Rol).order_by(Rol.id_rol).offset(skip).limit(limit).all()
+
+    def buscar_roles_por_id(
+        self, db: Session, id_rol: str, skip: int = 0, limit: int = 100
+    ) -> list[Rol]:
+        """
+        Busca roles por su id con coincidencia PARCIAL (el id se compara como texto)
+        y paginación. Devuelve una LISTA (mismo formato que el listado del front).
+        """
+        return (
+            db.query(Rol)
+            .filter(cast(Rol.id_rol, String).ilike(f"%{id_rol}%"))
+            .order_by(Rol.id_rol)
+            .offset(skip)
+            .limit(limit)
+            .all()
+        )
 
     def obtener_rol(self, id_rol: int, db: Session) -> Rol:
         rol = db.query(Rol).filter(Rol.id_rol == id_rol).first()

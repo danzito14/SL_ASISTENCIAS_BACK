@@ -15,6 +15,7 @@ from src.schemas.Incidencia_Schema import (
     IncidenciaCreate,
     IncidenciaResponse,
     IncidenciaUpdate,
+    RetardoResponse,
     TipoIncidencia,
 )
 from src.services.Incidencia_Service import incidencia_service
@@ -99,6 +100,38 @@ def listar_combinado(
     return incidencia_service.listar_combinado(
         db=db, id_empresa=id_empresa, skip=skip, limit=limit,
         tipo=tipo, origen=origen, fecha_inicio=fecha_inicio, fecha_fin=fecha_fin,
+    )
+
+
+# ── Retardos calculados (para el front de incidencias) ────────────────────────
+# NOTA: va ANTES de "/{id_incidencia}" para que /incidencias/retardos no se
+# interprete como un id.
+@router.get(
+    "/retardos",
+    response_model=list[RetardoResponse],
+    summary="Retardos calculados (rango de fechas)",
+    description="Calcula los retardos en un rango de fechas: por trabajador y día, su "
+                "primera entrada tardía respecto a la hora de entrada del área (con "
+                "tolerancia opcional). Una fila por trabajador/día. Por defecto, últimos 7 días. "
+                "No lee incidencias guardadas: se calcula al vuelo desde las asistencias.",
+)
+def retardos_calculados(
+    id_empresa: int | None = Depends(resolver_empresa_scope),
+    skip: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=500),
+    id_trabajador: int | None = Query(None, description="De un empleado específico."),
+    tolerancia_min: int = Query(0, ge=0, description="Minutos de tolerancia antes de contar como retardo."),
+    fecha_inicio: date | None = Query(None, description="YYYY-MM-DD. Por defecto, hace 7 días."),
+    fecha_fin: date | None = Query(None, description="YYYY-MM-DD, inclusivo. Por defecto, hoy."),
+    db: Session = Depends(get_db),
+    usuario: Usuario = Depends(usuario_actual),
+):
+    # Si filtras por trabajador, debe ser de tu empresa.
+    if id_trabajador is not None:
+        exigir_empresa(usuario, incidencia_service.empresa_de_trabajador(id_trabajador, db))
+    return incidencia_service.retardos_calculados(
+        db=db, id_empresa=id_empresa, fecha_inicio=fecha_inicio, fecha_fin=fecha_fin,
+        id_trabajador=id_trabajador, tolerancia_min=tolerancia_min, skip=skip, limit=limit,
     )
 
 

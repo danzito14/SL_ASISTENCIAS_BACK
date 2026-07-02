@@ -527,10 +527,18 @@ CREATE TABLE IF NOT EXISTS intentos_acceso (
     id_dispositivo        INT           REFERENCES dispositivos(id_dispositivo)
                               ON DELETE SET NULL,
     id_dispositivo_origen INT,
+    -- Estado de revisión (igual que las incidencias). 'justificada' en un intento
+    -- 'otra_empresa' dispara la creación de una asistencia manual (ver backend).
+    estado                estado_incidencia NOT NULL DEFAULT 'pendiente',
     creado_en_cliente     TIMESTAMPTZ,
     sincronizado_en       TIMESTAMPTZ   DEFAULT NOW(),
     fecha                 TIMESTAMPTZ   NOT NULL DEFAULT NOW()
 );
+
+-- Migración idempotente para BDs ya creadas (la tabla usa CREATE ... IF NOT EXISTS,
+-- así que en una BD existente el ALTER es lo que realmente agrega la columna).
+ALTER TABLE intentos_acceso
+    ADD COLUMN IF NOT EXISTS estado estado_incidencia NOT NULL DEFAULT 'pendiente';
 
 -- ── historial_auditoria ──────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS historial_auditoria (
@@ -831,6 +839,7 @@ DECLARE
     v_emp_puerta     INT;
     v_poligono       geography(POLYGON,4326);
     v_dentro         BOOLEAN;
+    v_geo_indet      BOOLEAN;
     v_nuevo_estado   estado_registro;
     v_tipo_inc       tipo_incidencia;
     v_desc           TEXT;
@@ -857,6 +866,7 @@ BEGIN
 
         v_nuevo_estado := NULL;
         v_tipo_inc     := NULL;
+        v_geo_indet    := FALSE;
 
         -- ── Capa 1: tipo de puerta compatible con el permiso ──────────────
         -- 'mixta' acepta a todos. 'campo'/'administrativa' restringen.
@@ -890,21 +900,25 @@ BEGIN
             END IF;
 
             IF v_poligono IS NULL OR r.ubicacion IS NULL THEN
-                v_dentro := FALSE;
+                -- Sin datos para juzgar (offline sin GPS o área sin geocerca):
+                -- NO penalizar. Geo indeterminada → se conserva dentro_de_area cliente.
+                v_geo_indet := TRUE;
             ELSE
                 v_dentro := ST_Covers(v_poligono, r.ubicacion);
-            END IF;
-
-            IF NOT v_dentro THEN
-                v_nuevo_estado := 'fuera_de_area'; v_tipo_inc := 'fuera_de_area';
-                v_desc := 'Ubicación fuera del área permitida.';
+                IF NOT v_dentro THEN
+                    v_nuevo_estado := 'fuera_de_area'; v_tipo_inc := 'fuera_de_area';
+                    v_desc := 'Ubicación fuera del área permitida.';
+                END IF;
             END IF;
         END IF;
 
         -- ── Aplicar resultado ─────────────────────────────────────────────
         IF v_nuevo_estado IS NULL THEN
-            -- Pasó las 3 capas: queda exitoso y marcamos dentro_de_area.
-            UPDATE escaneos SET dentro_de_area = TRUE WHERE id_escaneo = r.id_escaneo;
+            -- Pasó las 3 capas. Solo tocamos dentro_de_area si SÍ pudimos juzgar
+            -- la geo; si fue indeterminada, se conserva el valor del cliente.
+            IF NOT v_geo_indet THEN
+                UPDATE escaneos SET dentro_de_area = TRUE WHERE id_escaneo = r.id_escaneo;
+            END IF;
             c_validados := c_validados + 1;
         ELSE
             UPDATE escaneos
@@ -1065,10 +1079,15 @@ RETURNS TABLE(entradas_creadas INT, salidas_creadas INT, incidencias_creadas INT
 LANGUAGE plpgsql
 AS $$
 DECLARE
+    c_dedupe_seg CONSTANT INT := 90;   -- ventana de dedupe doble-scan (segundos)
     v_entradas    INT := 0;
     v_salidas     INT := 0;
     v_incidencias INT := 0;
 BEGIN
+    -- 0) Derivación por (trabajador, día) a una tabla temporal (idempotente
+    --    entre llamadas dentro de la misma transacción vía DROP IF EXISTS).
+    DROP TABLE IF EXISTS _deriv_asis;
+    CREATE TEMP TABLE _deriv_asis AS
     WITH params AS (
         -- Ventana del día objetivo (hoy - p_dias_atras) por empresa, en UTC.
         SELECT em.id_empresa,
@@ -1085,6 +1104,7 @@ BEGIN
         SELECT e.*,
                COALESCE(e.creado_en_cliente, e.fecha_hora) AS momento,
                p.id_empresa AS emp,
+               p.ini_utc, p.fin_utc,
                (timezone(p.zona_horaria, COALESCE(e.creado_en_cliente, e.fecha_hora)))::date AS fecha_local
         FROM escaneos e
         JOIN params p ON p.id_empresa = e.id_empresa
@@ -1093,90 +1113,145 @@ BEGIN
           AND e.estado_registro IN ('exitoso','manual')
           AND (p_id_trabajador IS NULL OR e.id_trabajador = p_id_trabajador)
     ),
-    conteo AS (
-        SELECT id_trabajador, COUNT(*) AS n FROM ev GROUP BY id_trabajador
+    -- Dedupe: un scan a < c_dedupe_seg del anterior del mismo trabajador NO es
+    -- un evento nuevo (evita salida espuria por doble-scan).
+    ev_evt AS (
+        SELECT ev.*,
+               (lag(momento) OVER w IS NULL
+                OR momento - lag(momento) OVER w >= make_interval(secs => c_dedupe_seg)) AS es_evento
+        FROM ev
+        WINDOW w AS (PARTITION BY id_trabajador ORDER BY momento)
+    ),
+    conteo AS (   -- nº de EVENTOS distintos (tras dedupe), no de filas
+        SELECT id_trabajador, COUNT(*) FILTER (WHERE es_evento) AS n
+        FROM ev_evt GROUP BY id_trabajador
     ),
     primero AS (   -- primer escaneo del día = ENTRADA
         SELECT DISTINCT ON (id_trabajador)
-            id_trabajador, id_puerta, emp, momento,
+            id_trabajador, id_puerta, emp, ini_utc, fin_utc, momento,
             confianza_biometrica, estado_registro, dentro_de_area,
-            id_dispositivo, ubicacion
+            id_dispositivo, id_dispositivo_origen, ubicacion
         FROM ev
         ORDER BY id_trabajador, momento ASC
     ),
-    ultimo AS (    -- último escaneo del día = SALIDA (si hay 2+)
+    ultimo AS (    -- último escaneo del día = SALIDA (si hay 2+ eventos)
         SELECT DISTINCT ON (id_trabajador)
             id_escaneo, id_trabajador, id_puerta, emp, momento, fecha_local,
             confianza_biometrica, estado_registro, dentro_de_area,
-            id_dispositivo, ubicacion
+            id_dispositivo, id_dispositivo_origen, ubicacion
         FROM ev
         ORDER BY id_trabajador, momento DESC
-    ),
-    ins_entradas AS (
+    )
+    SELECT pr.id_trabajador, pr.emp, u.fecha_local, c.n, pr.ini_utc, pr.fin_utc,
+           pr.id_puerta AS e_puerta, pr.momento AS e_momento, pr.confianza_biometrica AS e_conf,
+           pr.estado_registro AS e_estado, pr.dentro_de_area AS e_dentro,
+           pr.id_dispositivo AS e_disp, pr.id_dispositivo_origen AS e_disp_orig, pr.ubicacion AS e_ubic,
+           u.id_escaneo AS u_escaneo, u.id_puerta AS s_puerta, u.momento AS s_momento,
+           u.confianza_biometrica AS s_conf, u.estado_registro AS s_estado,
+           u.dentro_de_area AS s_dentro, u.id_dispositivo AS s_disp,
+           u.id_dispositivo_origen AS s_disp_orig, u.ubicacion AS s_ubic
+    FROM primero pr
+    JOIN conteo c ON c.id_trabajador = pr.id_trabajador
+    JOIN ultimo u ON u.id_trabajador = pr.id_trabajador;
+
+    -- 1) ENTRADA — re-ajustar la auto-derivada al primer scan actual (reconciliación).
+    UPDATE asistencia a
+       SET fecha_hora = d.e_momento, creado_en_cliente = d.e_momento,
+           id_puerta = d.e_puerta, confianza_biometrica = d.e_conf,
+           estado_registro = d.e_estado, dentro_de_area = d.e_dentro,
+           id_dispositivo = d.e_disp, id_dispositivo_origen = d.e_disp_orig, ubicacion = d.e_ubic
+      FROM _deriv_asis d
+     WHERE a.id_trabajador = d.id_trabajador
+       AND a.tipo_registro = 'entrada'
+       AND a.fecha_hora >= d.ini_utc AND a.fecha_hora < d.fin_utc
+       AND a.observaciones LIKE 'Entrada (primer escaneo%'   -- solo las auto-derivadas
+       AND a.fecha_hora <> d.e_momento;
+
+    -- ...y crearla si aún no existe (auto o manual) ese día.
+    WITH ins AS (
         INSERT INTO asistencia (
             id_trabajador, id_puerta, id_empresa, tipo_registro, fecha_hora,
             confianza_biometrica, estado_registro, dentro_de_area, observaciones,
-            id_dispositivo, ubicacion, creado_en_cliente
+            id_dispositivo, id_dispositivo_origen, ubicacion, creado_en_cliente
         )
-        SELECT pr.id_trabajador, pr.id_puerta, pr.emp, 'entrada', pr.momento,
-               pr.confianza_biometrica, pr.estado_registro, pr.dentro_de_area,
-               'Entrada (primer escaneo del día).',
-               pr.id_dispositivo, pr.ubicacion, pr.momento
-        FROM primero pr
+        SELECT d.id_trabajador, d.e_puerta, d.emp, 'entrada', d.e_momento,
+               d.e_conf, d.e_estado, d.e_dentro, 'Entrada (primer escaneo del día).',
+               d.e_disp, d.e_disp_orig, d.e_ubic, d.e_momento
+        FROM _deriv_asis d
         WHERE NOT EXISTS (
             SELECT 1 FROM asistencia a
-            WHERE a.id_trabajador = pr.id_trabajador
-              AND a.tipo_registro = 'entrada'
-              AND a.fecha_hora >= (SELECT ini_utc FROM params WHERE id_empresa = pr.emp)
-              AND a.fecha_hora <  (SELECT fin_utc FROM params WHERE id_empresa = pr.emp)
+            WHERE a.id_trabajador = d.id_trabajador AND a.tipo_registro = 'entrada'
+              AND a.fecha_hora >= d.ini_utc AND a.fecha_hora < d.fin_utc
         )
-        RETURNING 1
-    ),
-    ins_salidas AS (
-        INSERT INTO asistencia (
-            id_trabajador, id_puerta, id_empresa, tipo_registro, fecha_hora,
-            confianza_biometrica, estado_registro, dentro_de_area, observaciones,
-            id_dispositivo, ubicacion, creado_en_cliente
-        )
-        SELECT u.id_trabajador, u.id_puerta, u.emp, 'salida', u.momento,
-               u.confianza_biometrica, u.estado_registro, u.dentro_de_area,
-               'Salida inferida (último escaneo del día).',
-               u.id_dispositivo, u.ubicacion, u.momento
-        FROM ultimo u
-        JOIN conteo c ON c.id_trabajador = u.id_trabajador
-        WHERE p_incluir_salida
-          AND c.n >= 2
-          AND NOT EXISTS (
-              SELECT 1 FROM asistencia a
-              WHERE a.id_trabajador = u.id_trabajador
-                AND a.tipo_registro = 'salida'
-                AND a.fecha_hora >= (SELECT ini_utc FROM params WHERE id_empresa = u.emp)
-                AND a.fecha_hora <  (SELECT fin_utc FROM params WHERE id_empresa = u.emp)
-          )
-        RETURNING 1
-    ),
-    ins_incid AS (
-        INSERT INTO incidencias (
-            id_trabajador, id_empresa, tipo_incidencia, fecha, descripcion, id_escaneo_ref
-        )
-        SELECT u.id_trabajador, u.emp, 'entrada_sin_registro', u.fecha_local,
-               'Solo un escaneo en el día; sin salida detectable.', u.id_escaneo
-        FROM ultimo u
-        JOIN conteo c ON c.id_trabajador = u.id_trabajador
-        WHERE p_incluir_salida
-          AND c.n = 1
-          AND NOT EXISTS (
-              SELECT 1 FROM incidencias i
-              WHERE i.id_trabajador = u.id_trabajador
-                AND i.fecha = u.fecha_local
-                AND i.tipo_incidencia = 'entrada_sin_registro'
-          )
         RETURNING 1
     )
-    SELECT (SELECT COUNT(*) FROM ins_entradas),
-           (SELECT COUNT(*) FROM ins_salidas),
-           (SELECT COUNT(*) FROM ins_incid)
-    INTO v_entradas, v_salidas, v_incidencias;
+    SELECT COUNT(*) INTO v_entradas FROM ins;
+
+    IF p_incluir_salida THEN
+        -- 2) SALIDA (solo con 2+ eventos) — re-ajustar la auto al último scan actual.
+        UPDATE asistencia a
+           SET fecha_hora = d.s_momento, creado_en_cliente = d.s_momento,
+               id_puerta = d.s_puerta, confianza_biometrica = d.s_conf,
+               estado_registro = d.s_estado, dentro_de_area = d.s_dentro,
+               id_dispositivo = d.s_disp, id_dispositivo_origen = d.s_disp_orig, ubicacion = d.s_ubic
+          FROM _deriv_asis d
+         WHERE d.n >= 2 AND a.id_trabajador = d.id_trabajador
+           AND a.tipo_registro = 'salida'
+           AND a.fecha_hora >= d.ini_utc AND a.fecha_hora < d.fin_utc
+           AND a.observaciones LIKE 'Salida inferida%'
+           AND a.fecha_hora <> d.s_momento;
+
+        -- ...y crearla si no existe.
+        WITH ins AS (
+            INSERT INTO asistencia (
+                id_trabajador, id_puerta, id_empresa, tipo_registro, fecha_hora,
+                confianza_biometrica, estado_registro, dentro_de_area, observaciones,
+                id_dispositivo, id_dispositivo_origen, ubicacion, creado_en_cliente
+            )
+            SELECT d.id_trabajador, d.s_puerta, d.emp, 'salida', d.s_momento,
+                   d.s_conf, d.s_estado, d.s_dentro, 'Salida inferida (último escaneo del día).',
+                   d.s_disp, d.s_disp_orig, d.s_ubic, d.s_momento
+            FROM _deriv_asis d
+            WHERE d.n >= 2
+              AND NOT EXISTS (
+                  SELECT 1 FROM asistencia a
+                  WHERE a.id_trabajador = d.id_trabajador AND a.tipo_registro = 'salida'
+                    AND a.fecha_hora >= d.ini_utc AND a.fecha_hora < d.fin_utc
+              )
+            RETURNING 1
+        )
+        SELECT COUNT(*) INTO v_salidas FROM ins;
+
+        -- 3) RECONCILIAR: ya hay salida (2+ eventos) → retractar la incidencia
+        --    'entrada_sin_registro' PENDIENTE (falso positivo del lote anterior).
+        --    Las revisadas/justificadas NO se tocan (ya generaron su salida manual).
+        DELETE FROM incidencias i
+         USING _deriv_asis d
+         WHERE d.n >= 2 AND i.id_trabajador = d.id_trabajador
+           AND i.fecha = d.fecha_local
+           AND i.tipo_incidencia = 'entrada_sin_registro'
+           AND i.estado = 'pendiente';
+
+        -- 4) INCIDENCIA 'entrada_sin_registro' (un solo evento) si no existe.
+        WITH ins AS (
+            INSERT INTO incidencias (
+                id_trabajador, id_empresa, tipo_incidencia, fecha, descripcion, id_escaneo_ref
+            )
+            SELECT d.id_trabajador, d.emp, 'entrada_sin_registro', d.fecha_local,
+                   'Solo un escaneo en el día; sin salida detectable.', d.u_escaneo
+            FROM _deriv_asis d
+            WHERE d.n = 1
+              AND NOT EXISTS (
+                  SELECT 1 FROM incidencias i
+                  WHERE i.id_trabajador = d.id_trabajador AND i.fecha = d.fecha_local
+                    AND i.tipo_incidencia = 'entrada_sin_registro'
+              )
+            RETURNING 1
+        )
+        SELECT COUNT(*) INTO v_incidencias FROM ins;
+    END IF;
+
+    DROP TABLE IF EXISTS _deriv_asis;
 
     RAISE NOTICE 'Entradas: %, Salidas: %, Incidencias: %', v_entradas, v_salidas, v_incidencias;
     entradas_creadas    := v_entradas;

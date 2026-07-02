@@ -28,6 +28,9 @@ class IntentoAcceso(Base):
     ubicacion             = Column(Geography(geometry_type="POINT", srid=4326))
     id_dispositivo        = Column(Integer, ForeignKey("dispositivos.id_dispositivo"))
     id_dispositivo_origen = Column(Integer)
+    # Estado de revisión (igual que las incidencias). Justificar un intento
+    # 'otra_empresa' crea una asistencia manual (ver IntentoAcceso_Service).
+    estado                = Column(String(15), default="pendiente")
     creado_en_cliente     = Column(DateTime(timezone=True))
     sincronizado_en       = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     fecha                 = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))

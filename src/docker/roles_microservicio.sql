@@ -148,8 +148,20 @@ GRANT USAGE, SELECT ON SEQUENCE
     trabajadores_id_trabajador_seq,
     embeddings_id_embedding_seq
     TO svc_offline;
--- Ingesta de eventos (SELECT por el RETURNING que cuenta insertados vs duplicados).
+-- Ingesta de eventos. Las ASISTENCIAS ya NO se escriben directo: el lote offline
+-- alimenta 'escaneos' y corre el MISMO pipeline que el online (validar +
+-- consolidar), que DERIVA entrada/salida e incidencias. Los INTENTOS sí van
+-- directos a intentos_acceso (no requieren derivación).
+--   · escaneos: SELECT (RETURNING de conteo + consulta de días del lote) + INSERT.
+--   · las funciones son SECURITY DEFINER (§9c) → svc_offline solo necesita EXECUTE,
+--     NO escritura sobre asistencia/incidencias. El INSERT en asistencia de abajo
+--     queda como no-op histórico (inocuo).
+GRANT SELECT, INSERT ON escaneos TO svc_offline;
 GRANT SELECT, INSERT ON asistencia, intentos_acceso TO svc_offline;
+GRANT EXECUTE ON FUNCTION
+    validar_escaneos_lote(timestamptz),
+    consolidar_asistencia_dia(integer, integer, boolean)
+    TO svc_offline;
 -- Por si una fila llega sin UUID (normalmente lo genera el dispositivo).
 GRANT EXECUTE ON FUNCTION gen_uuid_v7() TO svc_offline;
 
@@ -229,6 +241,13 @@ ALTER FUNCTION fn_cascada_estado_empresa()    SECURITY DEFINER SET search_path =
 ALTER FUNCTION fn_cascada_estado_area()       SECURITY DEFINER SET search_path = public, pg_temp;
 ALTER FUNCTION fn_cascada_estado_trabajador() SECURITY DEFINER SET search_path = public, pg_temp;
 -- fn_proteger_empresa_admin solo lanza excepción: no requiere DEFINER.
+
+-- 9c) Pipeline de asistencia (escaneos → validar → consolidar). Pasan a SECURITY
+--     DEFINER (corren como su DUEÑO) para que los callers (svc_access, app_cron y
+--     ahora svc_offline con la ingesta offline) solo necesiten EXECUTE, sin
+--     escritura directa sobre asistencia/incidencias/escaneos. search_path fijo.
+ALTER FUNCTION validar_escaneos_lote(timestamptz)                SECURITY DEFINER SET search_path = public, pg_temp;
+ALTER FUNCTION consolidar_asistencia_dia(integer, integer, boolean) SECURITY DEFINER SET search_path = public, pg_temp;
 
 
 -- ════════════════════════════════════════════════════════════════════════════

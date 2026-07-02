@@ -1,5 +1,6 @@
 import logging
 
+from sqlalchemy import cast, String
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
 from fastapi import HTTPException, status
@@ -86,6 +87,31 @@ class AreaTrabajoService:
             query = query.filter(AreaTrabajo.id_empresa == id_empresa)
         if nombre is not None:
             query = query.filter(AreaTrabajo.nombre_area.ilike(f"%{nombre}%"))
+        return (
+            query
+            .order_by(AreaTrabajo.id_area)
+            .offset(skip)
+            .limit(limit)
+            .all()
+        )
+
+    def buscar_areas_por_id(
+        self,
+        db: Session,
+        id_area: str,
+        skip: int = 0,
+        limit: int = 100,
+        id_empresa: int | None = None,
+    ) -> list[AreaTrabajo]:
+        """
+        Busca áreas por su id con coincidencia PARCIAL (el id se compara como texto)
+        y paginación. Si id_empresa no es None, acota a esa empresa.
+        """
+        query = db.query(AreaTrabajo).filter(
+            cast(AreaTrabajo.id_area, String).ilike(f"%{id_area}%")
+        )
+        if id_empresa is not None:
+            query = query.filter(AreaTrabajo.id_empresa == id_empresa)
         return (
             query
             .order_by(AreaTrabajo.id_area)

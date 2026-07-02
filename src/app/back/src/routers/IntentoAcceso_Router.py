@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 from src.core.auth import exigir_empresa, resolver_empresa_scope, usuario_actual
 from src.core.pgdb import get_db
 from src.models.Rol_Usuario_Model import Usuario
-from src.schemas.IntentoAcceso_Schema import IntentoAccesoResponse, TipoIntento
+from src.schemas.IntentoAcceso_Schema import IntentoAccesoResponse, IntentoAccesoUpdate, TipoIntento
 from src.services.IntentoAcceso_Service import intento_acceso_service
 
 router = APIRouter(prefix="/intentos", tags=["Intentos de acceso"])
@@ -48,6 +48,26 @@ def obtener_intento(
 ):
     exigir_empresa(usuario, intento_acceso_service.empresa_de_intento(id_intento, db))
     return intento_acceso_service.obtener(id_intento=id_intento, db=db)
+
+
+# ── Actualizar intento (estado de revisión) ───────────────────────────────────
+@router.put(
+    "/{id_intento}",
+    response_model=IntentoAccesoResponse,
+    summary="Actualizar intento de acceso",
+    description="Actualiza el estado de un intento. Marcar 'justificada' un intento "
+                "'otra_empresa' crea una asistencia manual (entrada) con la puerta/empresa "
+                "del intento y marca la incidencia 'acceso_otra_empresa' ligada.",
+)
+def actualizar_intento(
+    id_intento: UUID,
+    datos: IntentoAccesoUpdate,
+    db: Session = Depends(get_db),
+    usuario: Usuario = Depends(usuario_actual),
+):
+    # Encapsulación: el intento (su puerta) debe ser de tu empresa.
+    exigir_empresa(usuario, intento_acceso_service.empresa_de_intento(id_intento, db))
+    return intento_acceso_service.actualizar(id_intento=id_intento, datos=datos, db=db)
 
 
 # ── Foto del intento (protegida) ──────────────────────────────────────────────

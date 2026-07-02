@@ -7,3 +7,4 @@ class Empresa(Base):
     __tablename__ = "empresas"
     id_empresa     = Column(Integer, primary_key=True)
     nombre_empresa = Column(String(100))
+    zona_horaria   = Column(String)   # p.ej. 'America/Mazatlan' (para pasar UTC→local)

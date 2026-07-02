@@ -1,8 +1,11 @@
 # offline_sync/routers/Sync_Router.py
+import hashlib
 import logging
+import os
 
 from fastapi import (APIRouter, Depends, File, HTTPException, Query, Request,
                      UploadFile, status)
+from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
 from src.core.auth import resolver_empresa_scope, usuario_actual
@@ -18,6 +21,32 @@ from src.services.Roster_Service import roster_service
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/off_sync", tags=["Offline Sync"])
+
+# Modelos ONNX que el APK puede bajar en su 1er arranque (whitelist = anti path-traversal).
+_MODELOS_APK = {"w600k_r50.onnx", "2.7_80x80_MiniFASNetV2.onnx"}
+
+# Cache de metadata por modelo (sha256 de 167MB cuesta ~1s → se calcula 1 vez y se
+# invalida si cambia mtime/tamaño). version = huella estable para que el APK detecte
+# cuándo el modelo del server cambió y re-descargue.
+_MODELO_META: dict[str, dict] = {}
+
+
+def _meta_modelo(nombre: str) -> dict:
+    ruta = os.path.join(settings.MODELOS_DIR, nombre)
+    if not os.path.isfile(ruta):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
+                            detail=f"modelo '{nombre}' no está en el servidor")
+    st = os.stat(ruta)
+    c = _MODELO_META.get(nombre)
+    if not c or c["mtime"] != st.st_mtime or c["tamano"] != st.st_size:
+        h = hashlib.sha256()
+        with open(ruta, "rb") as f:
+            for chunk in iter(lambda: f.read(1 << 20), b""):
+                h.update(chunk)
+        c = {"mtime": st.st_mtime, "tamano": st.st_size, "sha256": h.hexdigest(),
+             "version": f"{int(st.st_mtime)}-{st.st_size}"}
+        _MODELO_META[nombre] = c
+    return {"nombre": nombre, "tamano": c["tamano"], "sha256": c["sha256"], "version": c["version"]}
 
 
 # ── Bajada: roster para reconocer offline ─────────────────────────────────────
@@ -136,6 +165,36 @@ def subir_enrolamientos(
 ):
     principal = usuario_actual(request)
     return enrolamiento_service.enrolar(db, body.items, principal)
+
+
+# ── Bajada: modelos ONNX para el APK (descarga en el 1er arranque) ────────────
+@router.get(
+    "/modelo/{nombre}",
+    summary="Descargar un modelo ONNX para el APK (no se hornea en el APK)",
+    description="El APK baja aquí w600k_r50.onnx (reconocimiento) y "
+                "2.7_80x80_MiniFASNetV2.onnx (anti-spoof) en su 1er arranque, junto al "
+                "roster. Soporta descarga parcial (Range) para reanudar. Solo la whitelist.",
+)
+def descargar_modelo(nombre: str):
+    if nombre not in _MODELOS_APK:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="modelo no disponible")
+    ruta = os.path.join(settings.MODELOS_DIR, nombre)
+    if not os.path.isfile(ruta):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
+                            detail=f"modelo '{nombre}' no está en el servidor")
+    return FileResponse(ruta, media_type="application/octet-stream", filename=nombre)
+
+
+@router.get(
+    "/modelo/{nombre}/meta",
+    summary="Tamaño + sha256 + versión del modelo (el APK verifica la descarga)",
+    description="El APK compara el tamaño/versión contra lo que tiene en disco para "
+                "saber si debe (re)descargar, y usa el sha256 para verificar integridad.",
+)
+def modelo_meta(nombre: str):
+    if nombre not in _MODELOS_APK:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="modelo no disponible")
+    return _meta_modelo(nombre)
 
 
 # ── Estado/config del servicio ────────────────────────────────────────────────

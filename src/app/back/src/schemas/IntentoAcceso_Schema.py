@@ -7,6 +7,8 @@ from pydantic import BaseModel
 
 
 TipoIntento = Literal["spoofing", "desconocido", "otra_empresa"]
+# Mismo ciclo de revisión que las incidencias.
+EstadoIntento = Literal["pendiente", "revisada", "justificada"]
 
 
 class IntentoAccesoResponse(BaseModel):
@@ -17,6 +19,7 @@ class IntentoAccesoResponse(BaseModel):
     id_trabajador: int | None = None
     similitud:     float | None = None
     ruta_foto:     str | None = None
+    estado:        EstadoIntento = "pendiente"
     fecha:         datetime | None = None
 
     # Identidad/nombre resueltos por el backend (JOIN) cuando el intento tiene trabajador.
@@ -24,3 +27,9 @@ class IntentoAccesoResponse(BaseModel):
     trabajador_nombre: str | None = None
 
     model_config = {"from_attributes": True}
+
+
+class IntentoAccesoUpdate(BaseModel):
+    # Actualización parcial: hoy solo se gestiona el estado de revisión.
+    # Pasar 'estado'='justificada' en un intento 'otra_empresa' crea la asistencia manual.
+    estado: EstadoIntento | None = None

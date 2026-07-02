@@ -77,6 +77,26 @@ def listar_usuarios(
     return usuario_service.listar_usuarios(db=db, skip=skip, limit=limit, nombre=nombre)
 
 
+# ── Buscar usuarios por id ────────────────────────────────────────────────────
+# NOTA: declarado ANTES de "/{id_usuario}" para que /usuarios/buscar no se
+# interprete como un id.
+@router.get(
+    "/buscar",
+    response_model=list[UsuarioResponse],
+    summary="Buscar usuarios por id",
+    description="Búsqueda PARCIAL (contiene) por id_usuario, con paginación.",
+)
+def buscar_usuarios(
+    id_usuario: str = Query(..., min_length=1, description="Id de usuario o parte de él."),
+    skip: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=500),
+    db: Session = Depends(get_db),
+):
+    return usuario_service.buscar_usuarios_por_id(
+        db=db, id_usuario=id_usuario, skip=skip, limit=limit
+    )
+
+
 # ── Usuario actual (cualquier usuario autenticado) ────────────────────────────
 @router.get(
     "/me",

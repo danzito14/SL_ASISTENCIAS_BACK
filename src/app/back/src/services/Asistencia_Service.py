@@ -1,8 +1,9 @@
 import logging
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from uuid import UUID
 
 from sqlalchemy import or_
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, joinedload
 from fastapi import HTTPException, status
 
@@ -142,6 +143,101 @@ class AsistenciaService:
                 detail=f"Asistencia {id_asistencia} no encontrada.",
             )
         return self._enriquecer(asistencia)
+
+    # ── Creación manual (al justificar incidencias/intentos) ───────────────────
+    def existe_asistencia_dia(
+        self,
+        db: Session,
+        id_trabajador: int,
+        tipo_registro: str,
+        momento: datetime,
+    ) -> bool:
+        """
+        True si ya hay una asistencia de ese tipo (entrada/salida) para el trabajador
+        en el MISMO día (UTC) que `momento`. Sirve para no duplicar al justificar.
+        """
+        dia = momento.date()
+        return db.query(Asistencia.id_asistencia).filter(
+            Asistencia.id_trabajador == id_trabajador,
+            Asistencia.tipo_registro == tipo_registro,
+            Asistencia.fecha_hora >= datetime.combine(dia, datetime.min.time(), tzinfo=momento.tzinfo),
+            Asistencia.fecha_hora < datetime.combine(dia + timedelta(days=1), datetime.min.time(), tzinfo=momento.tzinfo),
+        ).first() is not None
+
+    def crear_asistencia_manual(
+        self,
+        db: Session,
+        *,
+        id_trabajador: int,
+        id_puerta: int,
+        id_empresa: int | None,
+        tipo_registro: str,
+        fecha_hora: datetime,
+        observaciones: str | None = None,
+        ubicacion=None,
+        id_dispositivo: int | None = None,
+        confianza_biometrica=None,
+        dentro_de_area: bool | None = None,
+    ) -> Asistencia:
+        """
+        Crea una asistencia con estado_registro='manual' y la deja en la sesión
+        (flush, sin commit) para que el llamador la persista en la misma transacción
+        que la justificación. NO valida duplicados: use existe_asistencia_dia antes.
+        """
+        asistencia = Asistencia(
+            id_trabajador=id_trabajador,
+            id_puerta=id_puerta,
+            id_empresa=id_empresa,
+            tipo_registro=tipo_registro,
+            fecha_hora=fecha_hora,
+            confianza_biometrica=confianza_biometrica,
+            estado_registro="manual",
+            dentro_de_area=dentro_de_area,
+            observaciones=observaciones,
+            id_dispositivo=id_dispositivo,
+            ubicacion=ubicacion,
+            creado_en_cliente=fecha_hora,
+        )
+        db.add(asistencia)
+        db.flush()  # asigna PK; el commit lo hace el servicio que justifica
+        return asistencia
+
+    def registrar_manual(
+        self,
+        db: Session,
+        *,
+        id_trabajador: int,
+        id_puerta: int,
+        id_empresa: int | None,
+        tipo_registro: str,
+        fecha_hora: datetime | None = None,
+        observaciones: str | None = None,
+        id_dispositivo: int | None = None,
+    ) -> Asistencia:
+        """
+        Crea y PERSISTE una asistencia manual (endpoint POST /asistencias). La
+        validación de empresa (trabajador/puerta) se hace en el router.
+        """
+        asistencia = self.crear_asistencia_manual(
+            db,
+            id_trabajador=id_trabajador,
+            id_puerta=id_puerta,
+            id_empresa=id_empresa,
+            tipo_registro=tipo_registro,
+            fecha_hora=fecha_hora or datetime.now(timezone.utc),
+            observaciones=observaciones,
+            id_dispositivo=id_dispositivo,
+        )
+        try:
+            db.commit()
+        except IntegrityError as exc:
+            db.rollback()
+            logger.error("Error de integridad al crear asistencia manual: %s", exc.orig)
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"No se pudo crear la asistencia: {exc.orig}",
+            )
+        return self.obtener_asistencia(asistencia.id_asistencia, db)
 
     # ── Derivación de empresa (para la encapsulación por empresa) ──────────────
     def empresa_de_trabajador(self, id_trabajador: int, db: Session) -> int | None:

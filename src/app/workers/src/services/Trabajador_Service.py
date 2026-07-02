@@ -130,6 +130,58 @@ class TrabajadorService:
 
         return trabajadores
 
+    def buscar_por_id_emp(
+        self,
+        db: Session,
+        id_emp: str,
+        skip: int = 0,
+        limit: int = 100,
+        id_empresa: int | None = None,
+    ) -> list[Trabajador]:
+        """
+        Busca trabajadores por su número de empleado externo (id_emp, nómina SYS21)
+        con coincidencia PARCIAL (ILIKE) y paginación.
+
+        id_emp NO es único por sí solo (solo lo es junto con origen_nomina) y puede
+        ser NULL en trabajadores creados a mano; por eso esto devuelve una LISTA, no
+        un único registro. Los trabajadores sin id_emp nunca coinciden.
+
+        Args:
+            db:         Sesión de BD
+            id_emp:     Texto a buscar dentro del número de empleado (parcial).
+            skip:       Cuántos registros saltar (paginación)
+            limit:      Máximo de registros a devolver
+            id_empresa: Si se indica, solo trabajadores de esa empresa.
+        Returns:
+            Lista de trabajadores cuyo id_emp contiene el texto buscado.
+        """
+        query = db.query(Trabajador).filter(Trabajador.id_emp.ilike(f"%{id_emp}%"))
+        if id_empresa is not None:
+            query = query.filter(Trabajador.id_empresa == id_empresa)
+
+        trabajadores = (
+            query
+            .order_by(Trabajador.id_trabajador)
+            .offset(skip)
+            .limit(limit)
+            .all()
+        )
+
+        # Marcar qué trabajadores tienen embedding facial (una sola consulta, sin N+1)
+        ids = [t.id_trabajador for t in trabajadores]
+        ids_con_embedding = {
+            id_trab
+            for (id_trab,) in db.query(Embedding.id_trabajador)
+            .filter(Embedding.id_trabajador.in_(ids))
+            .distinct()
+            .all()
+        } if ids else set()
+
+        for t in trabajadores:
+            t.tiene_embedding = t.id_trabajador in ids_con_embedding
+
+        return trabajadores
+
     def obtener_trabajador(self, id_trabajador: int, db: Session) -> Trabajador:
         """
         Devuelve un trabajador por su id o lanza 404 si no existe.

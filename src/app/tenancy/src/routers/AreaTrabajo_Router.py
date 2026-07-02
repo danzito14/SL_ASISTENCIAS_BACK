@@ -46,6 +46,30 @@ def listar_areas(
     return areatrabajo_service.listar_areas(db=db, skip=skip, limit=limit, id_empresa=id_empresa, nombre=nombre)
 
 
+# ── Buscar áreas de trabajo por id ────────────────────────────────────────────
+# NOTA: declarado ANTES de "/{id_area}" para que /areas/buscar no se interprete
+# como un id.
+@router.get(
+    "/buscar",
+    response_model=list[AreaTrabajoResponse],
+    summary="Buscar áreas de trabajo por id",
+    description=(
+        "Búsqueda PARCIAL (contiene) por id_area, con paginación. "
+        "Respeta el aislamiento por empresa."
+    ),
+)
+def buscar_areas(
+    id_area: str = Query(..., min_length=1, description="Id de área (o parte) a buscar."),
+    id_empresa: int | None = Depends(resolver_empresa_scope),
+    skip: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=500),
+    db: Session = Depends(get_db),
+):
+    return areatrabajo_service.buscar_areas_por_id(
+        db=db, id_area=id_area, skip=skip, limit=limit, id_empresa=id_empresa
+    )
+
+
 # ── Obtener área de trabajo por id ────────────────────────────────────────────
 @router.get(
     "/{id_area}",

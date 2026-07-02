@@ -24,6 +24,20 @@ class AsistenciaCreate(AsistenciaBase):
     pass
 
 
+class AsistenciaManualCreate(BaseModel):
+    """
+    Crear una asistencia A MANO desde el panel (estado_registro='manual'). Pensado
+    para resolver un 'rostro desconocido' asignándolo a un trabajador, o registrar
+    una entrada/salida que se perdió. La empresa se deriva del trabajador.
+    """
+    id_trabajador:  int
+    id_puerta:      int
+    tipo_registro:  TipoRegistro = "entrada"
+    fecha_hora:     datetime | None = None   # None = ahora (UTC)
+    observaciones:  str | None = None
+    id_dispositivo: int | None = None
+
+
 class AsistenciaResponse(AsistenciaBase):
     id_asistencia:  UUID
     id_empresa:     int | None = None

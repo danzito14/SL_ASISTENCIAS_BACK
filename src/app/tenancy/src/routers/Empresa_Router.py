@@ -50,6 +50,31 @@ def listar_empresas(
     return empresa_service.listar_empresas(db=db, skip=skip, limit=limit, id_empresa=id_empresa, nombre=nombre)
 
 
+# ── Buscar empresas por id ────────────────────────────────────────────────────
+# NOTA: el parámetro de búsqueda se llama "id" (no "id_empresa") porque
+# resolver_empresa_scope ya consume el query param "id_empresa" (para que el
+# super-admin elija empresa). Va ANTES de "/{id_empresa}".
+@router.get(
+    "/buscar",
+    response_model=list[EmpresaResponse],
+    summary="Buscar empresas por id",
+    description=(
+        "Búsqueda PARCIAL (contiene) por id de empresa, con paginación. "
+        "Respeta el aislamiento por empresa."
+    ),
+)
+def buscar_empresas(
+    id: str = Query(..., min_length=1, description="Id de empresa (o parte) a buscar."),
+    id_empresa: int | None = Depends(resolver_empresa_scope),
+    skip: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=500),
+    db: Session = Depends(get_db),
+):
+    return empresa_service.buscar_empresas_por_id(
+        db=db, id_buscar=id, skip=skip, limit=limit, id_empresa_scope=id_empresa
+    )
+
+
 # ── Obtener empresa por id ────────────────────────────────────────────────────
 @router.get(
     "/{id_empresa}",

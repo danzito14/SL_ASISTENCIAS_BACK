@@ -73,6 +73,11 @@ temp/
 # Docker
 docker-compose.override.yml
 
+# Modelos ONNX pesados que sirve offline_sync al APK (w600k_r50.onnx ~167MB).
+# NO se commitean: se copian del contenedor recognition al desplegar. El anti-spoof
+# (1.7MB) sí está versionado en recognition/models/antispoof/.
+src/docker/modelos_apk/
+
 # Secretos — llaves SSH/privadas (NUNCA commitear). La carpeta secrets/ se monta
 # en el contenedor con la llave del SFTP de fotos.
 src/docker/secrets/

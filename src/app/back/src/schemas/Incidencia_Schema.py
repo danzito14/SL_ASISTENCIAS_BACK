@@ -55,6 +55,24 @@ class IncidenciaResponse(IncidenciaBase):
     model_config = {"from_attributes": True}
 
 
+class RetardoResponse(BaseModel):
+    """
+    Retardo CALCULADO (no es una incidencia guardada): una fila por trabajador/día,
+    con la primera entrada tardía respecto a la hora de entrada del área. Lo consume
+    el front de incidencias al pedir GET /incidencias/retardos.
+    """
+    id_trabajador:     int
+    id_emp:            str | None = None    # número de empleado (SYS21), para mostrar
+    trabajador_nombre: str | None = None
+    id_area:           int | None = None
+    area_nombre:       str | None = None
+    id_empresa:        int | None = None
+    fecha:             date                  # fecha local del retardo
+    hora_esperada:     str                   # "HH:MM" (hora_entrada del área)
+    hora_real:         str                   # "HH:MM" (llegada, hora local)
+    minutos_retardo:   int
+
+
 class EventoResponse(BaseModel):
     """
     Vista UNIFICADA de incidencias + intentos de acceso, para mostrarlas juntas en

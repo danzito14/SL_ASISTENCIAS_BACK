@@ -31,6 +31,11 @@ class Settings(BaseSettings):
     EMBEDDING_DIM:   int = 512        # dimensión esperada del vector (buffalo_l)
     ENROL_MODELO_IA: str = "buffalo_l"
 
+    # ── Modelos IA para el APK ────────────────────────────────────────────────
+    # El APK NO hornea los .onnx pesados; los baja en el 1er arranque desde
+    # GET /off_sync/modelo/{nombre}. Carpeta (montada como volumen) con los .onnx.
+    MODELOS_DIR: str = "/models"
+
     # ── Auth — el gateway valida el JWT; aquí solo se leen headers X-* y scopes ─
     EMPRESA_ADMIN: int = 99
     GATEWAY_INTERNAL_TOKEN: str = ""  # X-Gateway-Token que inyecta Traefik; vacío = no se exige

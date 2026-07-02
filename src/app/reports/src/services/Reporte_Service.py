@@ -5,9 +5,10 @@ Cada reporte se acota por la empresa del usuario (None = super-admin → todas).
 """
 import csv
 import io
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from uuid import UUID
+from zoneinfo import ZoneInfo
 
 from fastapi import HTTPException, status
 from fastapi.responses import StreamingResponse
@@ -172,6 +173,76 @@ class ReporteService:
             ("escaneo_ref", "Escaneo (ID)"),
         ]
         return self._exportar(columnas, filas, "incidencias", formato)
+
+    def retardos(
+        self, db: Session, id_empresa: int | None, fecha_inicio: date | None,
+        fecha_fin: date | None, formato: str, id_trabajador: int | None = None,
+        tolerancia_min: int = 0,
+    ) -> StreamingResponse:
+        """
+        Reporte CALCULADO de retardos: entradas cuya hora LOCAL supera la hora_entrada
+        del área del trabajador (más una tolerancia opcional en minutos), con los
+        minutos de retraso. Solo considera áreas con hora_entrada definida.
+
+        La hora se compara en la zona horaria de la empresa (fecha_hora es UTC).
+        """
+        q = (
+            db.query(Asistencia, Trabajador, AreaTrabajo, Empresa)
+            .join(Trabajador, Trabajador.id_trabajador == Asistencia.id_trabajador)
+            .join(AreaTrabajo, AreaTrabajo.id_area == Trabajador.id_area)
+            .join(Empresa, Empresa.id_empresa == Asistencia.id_empresa)
+            .filter(Asistencia.tipo_registro == "entrada")
+            .filter(AreaTrabajo.hora_entrada.isnot(None))
+        )
+        if id_empresa is not None:
+            q = q.filter(Asistencia.id_empresa == id_empresa)
+        if id_trabajador is not None:
+            q = q.filter(Asistencia.id_trabajador == id_trabajador)
+        if fecha_inicio is not None:
+            q = q.filter(Asistencia.fecha_hora >= fecha_inicio)
+        if fecha_fin is not None:
+            q = q.filter(Asistencia.fecha_hora < _hasta_fin_de_dia(fecha_fin))
+
+        # ASC: la primera fila por (trabajador, día local) es su entrada más temprana;
+        # así se cuenta UNA sola vez al día (la hora real de llegada).
+        vistos: set = set()
+        filas = []
+        for a, t, ar, e in q.order_by(Asistencia.fecha_hora.asc()).all():
+            try:
+                tz = ZoneInfo(e.zona_horaria) if e.zona_horaria else timezone.utc
+            except Exception:
+                tz = timezone.utc
+            # fecha_hora es timestamptz (aware); si viniera naive, se asume UTC.
+            dt = a.fecha_hora if a.fecha_hora.tzinfo else a.fecha_hora.replace(tzinfo=timezone.utc)
+            local = dt.astimezone(tz)
+            clave = (t.id_trabajador, local.date())
+            if clave in vistos:
+                continue
+            vistos.add(clave)
+            esperada = ar.hora_entrada
+            retraso = (local.hour * 60 + local.minute) - (esperada.hour * 60 + esperada.minute)
+            if retraso <= tolerancia_min:
+                continue  # a tiempo (o dentro de la tolerancia)
+            filas.append({
+                "id_trabajador": t.id_trabajador,
+                "id_emp": t.id_emp,
+                "trabajador": f"{t.nombre} {t.apellido}",
+                "area": ar.nombre_area,
+                "empresa": e.nombre_empresa,
+                "fecha": local.date(),
+                "hora_esperada": esperada.strftime("%H:%M"),
+                "hora_real": local.strftime("%H:%M"),
+                "minutos_retardo": retraso,
+            })
+        # Más recientes primero para el archivo.
+        filas.sort(key=lambda r: (r["fecha"], r["minutos_retardo"]), reverse=True)
+        columnas = [
+            ("id_trabajador", "ID trabajador"), ("id_emp", "N° empleado"),
+            ("trabajador", "Trabajador"), ("area", "Área"), ("empresa", "Empresa"),
+            ("fecha", "Fecha"), ("hora_esperada", "Hora esperada"),
+            ("hora_real", "Hora real"), ("minutos_retardo", "Minutos de retardo"),
+        ]
+        return self._exportar(columnas, filas, "retardos", formato)
 
     def intentos(
         self, db: Session, id_empresa: int | None, fecha_inicio: date | None,

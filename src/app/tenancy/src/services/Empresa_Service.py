@@ -1,5 +1,6 @@
 import logging
 
+from sqlalchemy import cast, String
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
 from fastapi import HTTPException, status
@@ -71,6 +72,32 @@ class EmpresaService:
             query = query.filter(Empresa.id_empresa == id_empresa)
         if nombre is not None:
             query = query.filter(Empresa.nombre_empresa.ilike(f"%{nombre}%"))
+        return (
+            query
+            .order_by(Empresa.id_empresa)
+            .offset(skip)
+            .limit(limit)
+            .all()
+        )
+
+    def buscar_empresas_por_id(
+        self,
+        db: Session,
+        id_buscar: str,
+        skip: int = 0,
+        limit: int = 100,
+        id_empresa_scope: int | None = None,
+    ) -> list[Empresa]:
+        """
+        Busca empresas por su id con coincidencia PARCIAL (el id se compara como
+        texto) y paginación. Respeta el aislamiento multi-tenant: si
+        id_empresa_scope no es None, solo puede ver esa empresa.
+        """
+        query = db.query(Empresa).filter(
+            cast(Empresa.id_empresa, String).ilike(f"%{id_buscar}%")
+        )
+        if id_empresa_scope is not None:
+            query = query.filter(Empresa.id_empresa == id_empresa_scope)
         return (
             query
             .order_by(Empresa.id_empresa)

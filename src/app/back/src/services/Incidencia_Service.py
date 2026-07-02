@@ -8,8 +8,9 @@ desde el panel (revisar, justificar, corregir).
 """
 
 import logging
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from uuid import UUID
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import or_
 from sqlalchemy.orm import Session, joinedload
@@ -18,9 +19,13 @@ from fastapi import HTTPException, status
 
 from src.models.Incidencia_Model import Incidencia
 from src.models.IntentoAcceso_Model import IntentoAcceso
-from src.models.AreaTrabajo_Trabajador_Model import Trabajador
+from src.models.AreaTrabajo_Trabajador_Model import AreaTrabajo, Trabajador
+from src.models.Asistencia_HistorialAuditoria_Model import Asistencia
+from src.models.Escaneo_Model import Escaneo
+from src.models.Empresa_Model import Empresa
 from src.schemas.Incidencia_Schema import IncidenciaCreate, IncidenciaUpdate
 from src.services.Media_Service import media_service
+from src.services.Asistencia_Service import asistencia_service
 
 # Texto legible para describir un intento en la vista combinada.
 _DESC_INTENTO = {
@@ -273,6 +278,75 @@ class IncidenciaService:
         eventos.sort(key=lambda e: e["fecha_hora"] or _min, reverse=True)
         return eventos[skip: skip + limit]
 
+    def retardos_calculados(
+        self,
+        db: Session,
+        id_empresa: int | None = None,
+        fecha_inicio: date | None = None,
+        fecha_fin: date | None = None,
+        id_trabajador: int | None = None,
+        tolerancia_min: int = 0,
+        skip: int = 0,
+        limit: int = 100,
+    ) -> list[dict]:
+        """
+        Retardos CALCULADOS al vuelo (no son incidencias guardadas). Por cada
+        trabajador y día toma su PRIMERA entrada y, si su hora local supera la
+        hora_entrada del área (más la tolerancia), la reporta con los minutos de
+        retraso. UNA fila por trabajador/día. Sin rango, usa los últimos 7 días.
+        """
+        fecha_inicio, fecha_fin = resolver_rango_fechas(fecha_inicio, fecha_fin)
+
+        q = (
+            db.query(Asistencia, Trabajador, AreaTrabajo, Empresa)
+            .join(Trabajador, Trabajador.id_trabajador == Asistencia.id_trabajador)
+            .join(AreaTrabajo, AreaTrabajo.id_area == Trabajador.id_area)
+            .join(Empresa, Empresa.id_empresa == Asistencia.id_empresa)
+            .filter(Asistencia.tipo_registro == "entrada")
+            .filter(AreaTrabajo.hora_entrada.isnot(None))
+            .filter(Asistencia.fecha_hora >= fecha_inicio)
+            .filter(Asistencia.fecha_hora < datetime.combine(fecha_fin + timedelta(days=1), time.min))
+        )
+        if id_empresa is not None:
+            q = q.filter(Asistencia.id_empresa == id_empresa)
+        if id_trabajador is not None:
+            q = q.filter(Asistencia.id_trabajador == id_trabajador)
+
+        # ASC: la primera fila por (trabajador, día local) es su entrada más temprana.
+        vistos: set = set()
+        filas: list[dict] = []
+        for a, t, ar, e in q.order_by(Asistencia.fecha_hora.asc()).all():
+            try:
+                tz = ZoneInfo(e.zona_horaria) if e.zona_horaria else timezone.utc
+            except Exception:
+                tz = timezone.utc
+            dt = a.fecha_hora if a.fecha_hora.tzinfo else a.fecha_hora.replace(tzinfo=timezone.utc)
+            local = dt.astimezone(tz)
+            clave = (t.id_trabajador, local.date())
+            if clave in vistos:
+                continue
+            vistos.add(clave)
+            esperada = ar.hora_entrada
+            retraso = (local.hour * 60 + local.minute) - (esperada.hour * 60 + esperada.minute)
+            if retraso <= tolerancia_min:
+                continue
+            filas.append({
+                "id_trabajador": t.id_trabajador,
+                "id_emp": t.id_emp,
+                "trabajador_nombre": f"{t.nombre} {t.apellido}",
+                "id_area": ar.id_area,
+                "area_nombre": ar.nombre_area,
+                "id_empresa": e.id_empresa,
+                "fecha": local.date(),
+                "hora_esperada": esperada.strftime("%H:%M"),
+                "hora_real": local.strftime("%H:%M"),
+                "minutos_retardo": retraso,
+            })
+
+        # Más recientes / mayor retraso primero; paginar tras el cálculo.
+        filas.sort(key=lambda r: (r["fecha"], r["minutos_retardo"]), reverse=True)
+        return filas[skip: skip + limit]
+
     def obtener_incidencia(self, id_incidencia: UUID, db: Session) -> Incidencia:
         """Devuelve una incidencia por su id o lanza 404 si no existe."""
         incidencia = db.query(Incidencia).options(
@@ -298,6 +372,7 @@ class IncidenciaService:
         cambia el trabajador, valida que exista.
         """
         incidencia = self.obtener_incidencia(id_incidencia, db)
+        estado_anterior = incidencia.estado
 
         cambios = datos.model_dump(exclude_unset=True)
 
@@ -315,6 +390,11 @@ class IncidenciaService:
             setattr(incidencia, campo, valor)
 
         try:
+            # Al pasar a 'justificada' (solo en la transición) algunas incidencias
+            # generan una asistencia manual, en la MISMA transacción que la
+            # justificación (o ninguna si algo falla).
+            if incidencia.estado == "justificada" and estado_anterior != "justificada":
+                self._al_justificar(incidencia, db)
             db.commit()
         except IntegrityError as exc:
             db.rollback()
@@ -325,6 +405,93 @@ class IncidenciaService:
             )
         db.refresh(incidencia)
         return self._enriquecer(incidencia)
+
+    # ── Efectos al justificar una incidencia ───────────────────────────────────
+    def _al_justificar(self, incidencia: Incidencia, db: Session) -> None:
+        """
+        Despacha la creación de asistencia manual según el tipo de incidencia:
+          · area_incorrecta     → asistencia manual copiando el escaneo rechazado.
+          · entrada_sin_registro → SALIDA manual al fin del día (hay entrada, falta salida).
+          · acceso_otra_empresa → NO aquí: la asistencia la crea justificar el INTENTO
+                                   'otra_empresa' (par del mismo evento, con puerta).
+          · fuera_de_area y demás → no se crea nada.
+        """
+        tipo = incidencia.tipo_incidencia
+        if tipo == "area_incorrecta":
+            self._crear_asistencia_area_incorrecta(incidencia, db)
+        elif tipo == "entrada_sin_registro":
+            self._crear_salida_entrada_sin_registro(incidencia, db)
+
+    def _escaneo_de_incidencia(self, incidencia: Incidencia, db: Session) -> Escaneo:
+        """Escaneo que originó la incidencia, o 400 si no hay (no se puede crear asistencia)."""
+        if incidencia.id_escaneo_ref is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="No se puede justificar con asistencia: la incidencia no tiene escaneo asociado.",
+            )
+        escaneo = db.query(Escaneo).filter(Escaneo.id_escaneo == incidencia.id_escaneo_ref).first()
+        if escaneo is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="No se puede justificar con asistencia: el escaneo asociado ya no existe.",
+            )
+        return escaneo
+
+    def _fin_de_dia_utc(self, id_empresa: int | None, fecha: date, db: Session) -> datetime:
+        """23:59:59 de `fecha` en la zona horaria de la empresa (tz-aware)."""
+        zona = None
+        if id_empresa is not None:
+            fila = db.query(Empresa.zona_horaria).filter(Empresa.id_empresa == id_empresa).first()
+            zona = fila[0] if fila else None
+        try:
+            tz = ZoneInfo(zona) if zona else timezone.utc
+        except Exception:
+            tz = timezone.utc
+        return datetime.combine(fecha, time(23, 59, 59), tzinfo=tz)
+
+    def _crear_asistencia_area_incorrecta(self, incidencia: Incidencia, db: Session) -> None:
+        escaneo = self._escaneo_de_incidencia(incidencia, db)
+        if asistencia_service.existe_asistencia_dia(
+            db, escaneo.id_trabajador, escaneo.tipo_registro, escaneo.fecha_hora
+        ):
+            logger.info("Incidencia area_incorrecta %s: ya hay asistencia ese día; no se duplica.",
+                        incidencia.id_incidencia)
+            return
+        asistencia_service.crear_asistencia_manual(
+            db,
+            id_trabajador=escaneo.id_trabajador,
+            id_puerta=escaneo.id_puerta,
+            id_empresa=escaneo.id_empresa,
+            tipo_registro=escaneo.tipo_registro,
+            fecha_hora=escaneo.fecha_hora,
+            observaciones=f"Asistencia manual al justificar incidencia area_incorrecta {incidencia.id_incidencia}.",
+            ubicacion=escaneo.ubicacion,
+            id_dispositivo=escaneo.id_dispositivo,
+            confianza_biometrica=escaneo.confianza_biometrica,
+            dentro_de_area=escaneo.dentro_de_area,
+        )
+
+    def _crear_salida_entrada_sin_registro(self, incidencia: Incidencia, db: Session) -> None:
+        escaneo = self._escaneo_de_incidencia(incidencia, db)
+        fecha_hora_salida = self._fin_de_dia_utc(incidencia.id_empresa, incidencia.fecha, db)
+        if asistencia_service.existe_asistencia_dia(
+            db, escaneo.id_trabajador, "salida", fecha_hora_salida
+        ):
+            logger.info("Incidencia entrada_sin_registro %s: ya hay salida ese día; no se duplica.",
+                        incidencia.id_incidencia)
+            return
+        asistencia_service.crear_asistencia_manual(
+            db,
+            id_trabajador=escaneo.id_trabajador,
+            id_puerta=escaneo.id_puerta,
+            id_empresa=escaneo.id_empresa,
+            tipo_registro="salida",
+            fecha_hora=fecha_hora_salida,
+            observaciones=(f"Salida manual al justificar incidencia entrada_sin_registro "
+                           f"{incidencia.id_incidencia} (fin del día)."),
+            ubicacion=escaneo.ubicacion,
+            id_dispositivo=escaneo.id_dispositivo,
+        )
 
     # ── Derivación de empresa (para la encapsulación por empresa) ──────────────
     def empresa_de_trabajador(self, id_trabajador: int, db: Session) -> int | None:

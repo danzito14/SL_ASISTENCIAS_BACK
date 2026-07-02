@@ -1,5 +1,6 @@
 import logging
 
+from sqlalchemy import cast, String
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
 from fastapi import HTTPException, status
@@ -87,6 +88,31 @@ class PuertaAccesoService:
             query = query.filter(PuertaAcceso.id_empresa == id_empresa)
         if nombre is not None:
             query = query.filter(PuertaAcceso.nombre_puerta.ilike(f"%{nombre}%"))
+        return (
+            query
+            .order_by(PuertaAcceso.id_puerta)
+            .offset(skip)
+            .limit(limit)
+            .all()
+        )
+
+    def buscar_puertas_por_id(
+        self,
+        db: Session,
+        id_puerta: str,
+        skip: int = 0,
+        limit: int = 100,
+        id_empresa: int | None = None,
+    ) -> list[PuertaAcceso]:
+        """
+        Busca puertas por su id con coincidencia PARCIAL (el id se compara como
+        texto) y paginación. Si id_empresa no es None, acota a esa empresa.
+        """
+        query = db.query(PuertaAcceso).filter(
+            cast(PuertaAcceso.id_puerta, String).ilike(f"%{id_puerta}%")
+        )
+        if id_empresa is not None:
+            query = query.filter(PuertaAcceso.id_empresa == id_empresa)
         return (
             query
             .order_by(PuertaAcceso.id_puerta)

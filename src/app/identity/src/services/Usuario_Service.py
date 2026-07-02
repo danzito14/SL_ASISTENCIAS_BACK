@@ -1,5 +1,6 @@
 import logging
 
+from sqlalchemy import cast, String
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
 from fastapi import HTTPException, status
@@ -59,6 +60,23 @@ class UsuarioService:
         if nombre is not None:
             query = query.filter(Usuario.nombre_usuario.ilike(f"%{nombre}%"))
         return query.order_by(Usuario.id_usuario).offset(skip).limit(limit).all()
+
+    def buscar_usuarios_por_id(
+        self, db: Session, id_usuario: str, skip: int = 0, limit: int = 100
+    ) -> list[Usuario]:
+        """
+        Busca usuarios por su id con coincidencia PARCIAL (el id se compara como
+        texto, así "1" trae 1, 10, 11, ...) y paginación. Devuelve una LISTA para
+        conservar el mismo formato que el listado del front.
+        """
+        return (
+            db.query(Usuario)
+            .filter(cast(Usuario.id_usuario, String).ilike(f"%{id_usuario}%"))
+            .order_by(Usuario.id_usuario)
+            .offset(skip)
+            .limit(limit)
+            .all()
+        )
 
     def obtener_usuario(self, id_usuario: int, db: Session) -> Usuario:
         usuario = db.query(Usuario).filter(Usuario.id_usuario == id_usuario).first()

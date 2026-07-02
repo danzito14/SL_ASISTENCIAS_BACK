@@ -1,5 +1,6 @@
 import logging
 
+from sqlalchemy import cast, String
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
 from fastapi import HTTPException, status
@@ -78,6 +79,31 @@ class DispositivosService:
         if nombre is not None:
             query = query.filter(Dispositivo.nombre_dispositivo.ilike(f"%{nombre}%"))
 
+        return (
+            query
+            .order_by(Dispositivo.id_dispositivo)
+            .offset(skip)
+            .limit(limit)
+            .all()
+        )
+
+    def buscar_dispositivos_por_id(
+        self,
+        db: Session,
+        id_dispositivo: str,
+        skip: int = 0,
+        limit: int = 100,
+        id_empresa: int | None = None,
+    ) -> list[Dispositivo]:
+        """
+        Busca dispositivos por su id con coincidencia PARCIAL (el id se compara como
+        texto) y paginación. Si id_empresa no es None, acota a esa empresa.
+        """
+        query = db.query(Dispositivo).filter(
+            cast(Dispositivo.id_dispositivo, String).ilike(f"%{id_dispositivo}%")
+        )
+        if id_empresa is not None:
+            query = query.filter(Dispositivo.id_empresa == id_empresa)
         return (
             query
             .order_by(Dispositivo.id_dispositivo)

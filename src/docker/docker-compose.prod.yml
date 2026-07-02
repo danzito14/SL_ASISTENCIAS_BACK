@@ -447,6 +447,12 @@ services:
       ENROL_ORIGEN: "apk"
       EMBEDDING_DIM: "512"
       ENROL_MODELO_IA: "buffalo_l"
+      # Modelos que sirve GET /off_sync/modelo/{nombre} para que el APK los baje.
+      MODELOS_DIR: /models
+    volumes:
+      # Carpeta (gitignored) con los .onnx que baja el APK. Copiar w600k_r50.onnx
+      # del contenedor recognition y el anti-spoof del repo. Ver README de deploy.
+      - ./modelos_apk:/models:ro
     # Sin 'ports': el APK lo alcanza por el gateway (HTTPS). Para depurar local,
     # descomenta temporalmente y revisa /docs en http://localhost:8011.
     # ports:

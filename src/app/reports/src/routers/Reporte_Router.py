@@ -71,7 +71,9 @@ def reporte_incidencias(
 @router.get(
     "/retardos",
     summary="Reporte de retardos (XLSX/CSV)",
-    description="Incidencias de tipo 'retardo' de tu empresa.",
+    description="Retardo CALCULADO: entradas cuya hora local supera la hora de entrada "
+                "del área del trabajador (más una tolerancia opcional), con los minutos "
+                "de retraso. Solo áreas con hora de entrada definida.",
     responses=_FILE_RESPONSES,
 )
 def reporte_retardos(
@@ -79,11 +81,13 @@ def reporte_retardos(
     fecha_inicio: date | None = Query(None, description="YYYY-MM-DD"),
     fecha_fin: date | None = Query(None, description="YYYY-MM-DD (inclusivo)"),
     id_trabajador: int | None = Query(None, description="De un empleado específico."),
+    tolerancia_min: int = Query(0, ge=0, description="Minutos de tolerancia antes de contar como retardo."),
     id_empresa: int | None = Depends(resolver_empresa_scope),
     db: Session = Depends(get_db),
 ):
-    return reporte_service.incidencias(
-        db, id_empresa, fecha_inicio, fecha_fin, formato, tipo="retardo", id_trabajador=id_trabajador
+    return reporte_service.retardos(
+        db, id_empresa, fecha_inicio, fecha_fin, formato,
+        id_trabajador=id_trabajador, tolerancia_min=tolerancia_min,
     )
 
 

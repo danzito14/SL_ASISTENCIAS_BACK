@@ -3,7 +3,8 @@ from pydantic import BaseModel
 
 
 class FilaRechazada(BaseModel):
-    linea: int       # número de línea en el CSV (1 = encabezado; los datos arrancan en 2)
+    linea: int              # número de línea en el CSV (1 = encabezado; los datos arrancan en 2)
+    id: str | None = None   # PK de la fila (id_asistencia/id_intento) para que el front NO mapee por línea
     motivo: str
 
 

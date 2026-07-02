@@ -40,8 +40,19 @@ class ItemRechazado(BaseModel):
     motivo: str
 
 
+class ItemEnrolado(BaseModel):
+    """Resultado OK de un item, para que el APK ligue su id_local con el
+    id_trabajador que asignó el server (sin re-descargar todo el roster)."""
+    indice: int
+    id_local: str | None = None       # el que mandó el dispositivo (walk-in)
+    id_trabajador: int                # PK real en la BD (para reconocer offline ya)
+    modo: str                         # 'walkin' | 'asignado'
+    creado: bool = False              # walk-in: True=alta nueva, False=actualizado
+
+
 class EnrolamientoResponse(BaseModel):
     creados: int = 0       # walk-in nuevos
     actualizados: int = 0  # walk-in que ya existían (mismo id_local)
     asignados: int = 0     # rostros puestos a un trabajador existente
+    enrolados: list[ItemEnrolado] = []   # mapa id_local → id_trabajador de los OK
     rechazados: list[ItemRechazado] = []

@@ -46,6 +46,30 @@ def listar_puertas(
     return puertaacceso_service.listar_puertas(db=db, skip=skip, limit=limit, id_empresa=id_empresa, nombre=nombre)
 
 
+# ── Buscar puertas de acceso por id ───────────────────────────────────────────
+# NOTA: declarado ANTES de "/{id_puerta}" para que /puertas/buscar no se
+# interprete como un id.
+@router.get(
+    "/buscar",
+    response_model=list[PuertaAccesoResponse],
+    summary="Buscar puertas de acceso por id",
+    description=(
+        "Búsqueda PARCIAL (contiene) por id_puerta, con paginación. "
+        "Respeta el aislamiento por empresa."
+    ),
+)
+def buscar_puertas(
+    id_puerta: str = Query(..., min_length=1, description="Id de puerta (o parte) a buscar."),
+    id_empresa: int | None = Depends(resolver_empresa_scope),
+    skip: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=500),
+    db: Session = Depends(get_db),
+):
+    return puertaacceso_service.buscar_puertas_por_id(
+        db=db, id_puerta=id_puerta, skip=skip, limit=limit, id_empresa=id_empresa
+    )
+
+
 # ── Obtener puerta de acceso por id ───────────────────────────────────────────
 @router.get(
     "/{id_puerta}",

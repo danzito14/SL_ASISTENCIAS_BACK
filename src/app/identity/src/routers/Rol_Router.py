@@ -34,6 +34,25 @@ def listar_roles(
     return rol_service.listar_roles(db=db, skip=skip, limit=limit)
 
 
+# NOTA: "/buscar" va ANTES de "/{id_rol}" para que /roles/buscar no se interprete
+# como un id.
+@router.get(
+    "/buscar",
+    response_model=list[RolResponse],
+    summary="Buscar roles por id",
+    description="Búsqueda PARCIAL (contiene) por id_rol, con paginación.",
+)
+def buscar_roles(
+    id_rol: str = Query(..., min_length=1, description="Id de rol o parte de él."),
+    skip: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=500),
+    db: Session = Depends(get_db),
+):
+    return rol_service.buscar_roles_por_id(
+        db=db, id_rol=id_rol, skip=skip, limit=limit
+    )
+
+
 @router.get(
     "/{id_rol}",
     response_model=RolResponse,

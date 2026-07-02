@@ -45,6 +45,30 @@ def listar_dispositivos(
     )
 
 
+# ── Buscar dispositivos por id ────────────────────────────────────────────────
+# NOTA: declarado ANTES de "/{id_dispositivo}" para que /dispositivos/buscar no se
+# interprete como un id.
+@router.get(
+    "/buscar",
+    response_model=list[DispositivoResponse],
+    summary="Buscar dispositivos por id",
+    description=(
+        "Búsqueda PARCIAL (contiene) por id_dispositivo, con paginación. "
+        "Respeta el aislamiento por empresa."
+    ),
+)
+def buscar_dispositivos(
+    id_dispositivo: str = Query(..., min_length=1, description="Id de dispositivo (o parte) a buscar."),
+    id_empresa: int | None = Depends(resolver_empresa_scope),
+    skip: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=500),
+    db: Session = Depends(get_db),
+):
+    return dispositivo_service.buscar_dispositivos_por_id(
+        db=db, id_dispositivo=id_dispositivo, skip=skip, limit=limit, id_empresa=id_empresa
+    )
+
+
 # ── Obtener dispositivo por id ────────────────────────────────────────────────
 @router.get(
     "/{id_dispositivo}",

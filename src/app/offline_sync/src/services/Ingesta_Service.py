@@ -1,15 +1,23 @@
 # offline_sync/services/Ingesta_Service.py
 """
-Ingesta por lotes (CSV) de lo que el APK capturó offline: asistencias e intentos
-rechazados. IDEMPOTENTE: la PK es un UUIDv7 generado en el dispositivo, así que
-re-subir el mismo CSV NO duplica (INSERT ... ON CONFLICT (id) DO NOTHING).
+Ingesta por lotes (CSV) de lo que el APK capturó offline.
 
-dentro_de_area: el APK lo precalcula; aquí se RE-AUDITA con PostGIS (ST_Covers del
-punto contra el polígono del área de la puerta) y se guarda el valor auditado;
-si no hay punto o el área no tiene polígono, se conserva el del cliente.
+ASISTENCIAS  → se ingieren como ESCANEOS (la fuente de verdad) y luego se corre
+el MISMO pipeline que el online:
+    escaneos → validar_escaneos_lote(desde) → consolidar_asistencia_dia(dia, NULL, TRUE)
+Ese pipeline DERIVA entrada/salida (1er scan=entrada, último=salida) e incidencias
+en el SERVIDOR, con la zona horaria de la empresa. El `tipo_registro` del CSV se
+IGNORA (el kiosko no sabe si es entrada o salida). Es idempotente (PK UUIDv7 del
+dispositivo + ON CONFLICT DO NOTHING) y reconcilia lotes tardíos/desordenados
+(consolidar re-ajusta entrada/salida y retracta 'entrada_sin_registro').
 
-Cada fila va en su propio SAVEPOINT: una fila inválida (FK, enum, etc.) se rechaza
-y reporta sin abortar el resto del lote.
+INTENTOS rechazados → van directos a intentos_acceso (no requieren derivación).
+
+dentro_de_area: el APK lo precalcula; validar_escaneos_lote lo RE-AUDITA con
+PostGIS. Sin fix GPS (lat/lon nulos) NO se penaliza: se conserva el valor cliente.
+
+Cada fila va en su propio SAVEPOINT: una fila inválida se rechaza y se reporta
+(con su PK) sin abortar el resto del lote.
 """
 import csv
 import io
@@ -29,28 +37,32 @@ logger = logging.getLogger(__name__)
 TIPOS_REGISTRO = {"entrada", "salida"}
 TIPOS_INTENTO = {"spoofing", "desconocido", "otra_empresa"}
 
-_SQL_ASISTENCIA = text("""
-    INSERT INTO asistencia (
-        id_asistencia, id_trabajador, id_puerta, id_empresa, tipo_registro,
+# Las asistencias offline entran como ESCANEOS. estado 'exitoso' → los toma el
+# pipeline. tipo_registro es solo un placeholder (columna NOT NULL); se DERIVA.
+_SQL_ESCANEO = text("""
+    INSERT INTO escaneos (
+        id_escaneo, id_trabajador, id_puerta, id_empresa, tipo_registro,
         fecha_hora, confianza_biometrica, estado_registro, dentro_de_area,
-        id_dispositivo_origen, ubicacion, creado_en_cliente, sincronizado_en
+        id_dispositivo_origen, ubicacion, creado_en_cliente
     ) VALUES (
-        :id_asistencia, :id_trabajador, :id_puerta, :id_empresa, CAST(:tipo_registro AS tipo_registro),
-        :creado_en_cliente, :confianza, 'exitoso',
-        CASE WHEN :lon IS NULL OR :lat IS NULL THEN :dentro_cliente
-             ELSE COALESCE((
-                    SELECT ST_Covers(a.ubicacion, ST_SetSRID(ST_MakePoint(:lon, :lat), 4326)::geography)
-                    FROM puertas_acceso p JOIN area_trabajo a ON a.id_area = p.id_area
-                    WHERE p.id_puerta = :id_puerta AND a.ubicacion IS NOT NULL
-                  ), :dentro_cliente)
-        END,
+        :id, :id_trabajador, :id_puerta, :id_empresa, CAST(:tipo_registro AS tipo_registro),
+        COALESCE(:creado_en_cliente, NOW()), :confianza, 'exitoso', :dentro_cliente,
         :id_dispositivo_origen,
         CASE WHEN :lon IS NULL OR :lat IS NULL THEN NULL
              ELSE ST_SetSRID(ST_MakePoint(:lon, :lat), 4326)::geography END,
-        :creado_en_cliente, NOW()
+        :creado_en_cliente
     )
-    ON CONFLICT (id_asistencia) DO NOTHING
-    RETURNING id_asistencia
+    ON CONFLICT (id_escaneo) DO NOTHING
+    RETURNING id_escaneo
+""")
+
+# Días (por empresa/TZ) presentes en el lote → para consolidar cada uno.
+_SQL_DIAS_LOTE = text("""
+    SELECT DISTINCT (timezone(em.zona_horaria, now())::date
+         - timezone(em.zona_horaria, COALESCE(e.creado_en_cliente, e.fecha_hora))::date) AS d
+    FROM escaneos e
+    JOIN empresas em ON em.id_empresa = e.id_empresa
+    WHERE e.id_escaneo = ANY(CAST(:ids AS uuid[]))
 """)
 
 _SQL_INTENTO = text("""
@@ -97,57 +109,75 @@ def _motivo(exc: Exception) -> str:
     return str(getattr(exc, "orig", exc)).splitlines()[0][:200]
 
 
+def _pk_crudo(fila: dict) -> str | None:
+    """PK que trae la fila del CSV (para reportarla en rechazados)."""
+    return fila.get("id_asistencia") or fila.get("id_intento")
+
+
 class IngestaService:
 
+    # ── ASISTENCIAS: escaneos + pipeline (derivación entrada/salida) ───────────
     def ingerir_asistencias(self, db: Session, contenido: str, principal: Principal) -> IngestaResponse:
-        return self._ingerir(db, contenido, principal, self._parse_asistencia, _SQL_ASISTENCIA)
-
-    def ingerir_intentos(self, db: Session, contenido: str, principal: Principal) -> IngestaResponse:
-        return self._ingerir(db, contenido, principal, self._parse_intento, _SQL_INTENTO)
-
-    def _ingerir(self, db, contenido, principal, parser, sql) -> IngestaResponse:
         lector = csv.DictReader(io.StringIO(contenido))
         insertados = duplicados = recibidos = 0
         rechazados: list[FilaRechazada] = []
+        # Marca temporal (reloj de la BD) para acotar validar_escaneos_lote al lote.
+        desde = db.execute(text("SELECT now()")).scalar()
+        ids_lote: list[str] = []
+
         for i, fila in enumerate(lector, start=2):  # línea 1 = encabezado
             recibidos += 1
             if recibidos > settings.INGESTA_MAX_FILAS:
-                rechazados.append(FilaRechazada(linea=i, motivo="limite_filas_excedido"))
+                rechazados.append(FilaRechazada(linea=i, id=_pk_crudo(fila), motivo="limite_filas_excedido"))
                 break
             try:
-                params = parser(fila, principal)
+                params = self._parse_asistencia(fila, principal)
             except ValueError as e:
-                rechazados.append(FilaRechazada(linea=i, motivo=str(e)))
+                rechazados.append(FilaRechazada(linea=i, id=fila.get("id_asistencia"), motivo=str(e)))
                 continue
             try:
                 with db.begin_nested():
-                    r = db.execute(sql, params).first()
+                    r = db.execute(_SQL_ESCANEO, params).first()
+                ids_lote.append(str(params["id"]))  # insertados y duplicados: re-derivar el día
                 if r:
                     insertados += 1
                 else:
                     duplicados += 1
             except Exception as exc:
-                logger.warning("Ingesta línea %d rechazada: %s", i, exc)
-                rechazados.append(FilaRechazada(linea=i, motivo=_motivo(exc)))
+                logger.warning("Ingesta escaneo línea %d rechazada: %s", i, exc)
+                rechazados.append(FilaRechazada(linea=i, id=str(params.get("id")), motivo=_motivo(exc)))
         db.commit()
+
+        # Pipeline de derivación (validar 3 capas + consolidar por día del lote).
+        # Si falla, los escaneos ya quedaron: la próxima subida re-deriva (idempotente).
+        if ids_lote:
+            self._derivar_asistencia(db, desde, ids_lote)
+
         return IngestaResponse(recibidos=recibidos, insertados=insertados,
                                duplicados=duplicados, rechazados=rechazados)
 
-    def _empresa_ok(self, id_empresa, principal: Principal) -> None:
-        if id_empresa is None:
-            raise ValueError("id_empresa_requerido")
-        if not es_admin(principal) and id_empresa != principal.empresa:
-            raise ValueError("empresa_no_permitida")
+    def _derivar_asistencia(self, db: Session, desde, ids_lote: list[str]) -> None:
+        try:
+            db.execute(text("SELECT validar_escaneos_lote(:desde)"), {"desde": desde})
+            dias = db.execute(_SQL_DIAS_LOTE, {"ids": ids_lote}).scalars().all()
+            for d in dias:
+                db.execute(text("SELECT consolidar_asistencia_dia(:d, NULL, TRUE)"), {"d": int(d)})
+            db.commit()
+        except Exception as exc:
+            db.rollback()
+            logger.error("No se pudo derivar la asistencia del lote offline: %s", exc)
 
     def _parse_asistencia(self, fila: dict, principal: Principal) -> dict:
         id_emp = _i(fila.get("id_empresa"))
         self._empresa_ok(id_emp, principal)
+        # tipo_registro se DERIVA en el server; el del CSV es solo placeholder de la
+        # columna NOT NULL de escaneos. Si viene inválido/ausente, se usa 'entrada'.
         tipo = (fila.get("tipo_registro") or "").strip().lower()
         if tipo not in TIPOS_REGISTRO:
-            raise ValueError("tipo_registro_invalido")
+            tipo = "entrada"
         try:
             p = {
-                "id_asistencia": _uuid(fila.get("id_asistencia")),
+                "id": _uuid(fila.get("id_asistencia")),
                 "id_trabajador": _i(fila.get("id_trabajador")),
                 "id_puerta": _i(fila.get("id_puerta")),
                 "id_empresa": id_emp,
@@ -164,6 +194,41 @@ class IngestaService:
         if p["id_trabajador"] is None or p["id_puerta"] is None or p["creado_en_cliente"] is None:
             raise ValueError("campos_obligatorios_faltantes")
         return p
+
+    # ── INTENTOS: directos a intentos_acceso (sin derivación) ──────────────────
+    def ingerir_intentos(self, db: Session, contenido: str, principal: Principal) -> IngestaResponse:
+        lector = csv.DictReader(io.StringIO(contenido))
+        insertados = duplicados = recibidos = 0
+        rechazados: list[FilaRechazada] = []
+        for i, fila in enumerate(lector, start=2):
+            recibidos += 1
+            if recibidos > settings.INGESTA_MAX_FILAS:
+                rechazados.append(FilaRechazada(linea=i, id=fila.get("id_intento"), motivo="limite_filas_excedido"))
+                break
+            try:
+                params = self._parse_intento(fila, principal)
+            except ValueError as e:
+                rechazados.append(FilaRechazada(linea=i, id=fila.get("id_intento"), motivo=str(e)))
+                continue
+            try:
+                with db.begin_nested():
+                    r = db.execute(_SQL_INTENTO, params).first()
+                if r:
+                    insertados += 1
+                else:
+                    duplicados += 1
+            except Exception as exc:
+                logger.warning("Ingesta intento línea %d rechazada: %s", i, exc)
+                rechazados.append(FilaRechazada(linea=i, id=str(params.get("id_intento")), motivo=_motivo(exc)))
+        db.commit()
+        return IngestaResponse(recibidos=recibidos, insertados=insertados,
+                               duplicados=duplicados, rechazados=rechazados)
+
+    def _empresa_ok(self, id_empresa, principal: Principal) -> None:
+        if id_empresa is None:
+            raise ValueError("id_empresa_requerido")
+        if not es_admin(principal) and id_empresa != principal.empresa:
+            raise ValueError("empresa_no_permitida")
 
     def _parse_intento(self, fila: dict, principal: Principal) -> dict:
         id_emp = _i(fila.get("id_empresa"))

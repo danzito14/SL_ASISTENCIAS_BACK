@@ -25,6 +25,10 @@ SPOOFING_UMBRAL = 0.5
 LIVENESS_MIN_FRAMES_CON_ROSTRO = 2
 LIVENESS_MISMA_PERSONA_UMBRAL = 0.45
 LIVENESS_MOVIMIENTO_MIN = 0.004
+# Margen alrededor de la cara al recortar (fracción del tamaño del box, por lado).
+# >0 deja cabeza/hombros/aire para que la foto del intento o incidencia se pueda
+# reutilizar (p. ej. enrolar a un 'desconocido' desde esa misma foto).
+RECORTE_MARGEN = 0.5
 
 
 class Motor:
@@ -155,14 +159,23 @@ class Motor:
         return {"id_trabajador": row.id_trabajador, "id_empresa": row.id_empresa, "similitud": float(row.similitud)}
 
     def recorte_jpeg(self, frame: np.ndarray, cara: dict) -> bytes | None:
+        """
+        Recorte JPEG de la cara CON MARGEN alrededor (no pega al bounding box). Así la
+        foto del intento/incidencia es reutilizable: para enrolar a un 'desconocido'
+        desde esa misma foto, recognition necesita re-detectar la cara, y un recorte
+        ajustado al milímetro (sin frente, mentón ni aire) lo dificulta.
+        """
         h, w = frame.shape[:2]
-        x1, y1, x2, y2 = cara["bbox"]
-        x1, y1 = max(0, int(x1)), max(0, int(y1))
-        x2, y2 = min(w, int(x2)), min(h, int(y2))
+        x1, y1, x2, y2 = (int(v) for v in cara["bbox"])
+        # Expandir el box RECORTE_MARGEN de su tamaño por cada lado (clamp al frame).
+        dx = int((x2 - x1) * RECORTE_MARGEN)
+        dy = int((y2 - y1) * RECORTE_MARGEN)
+        x1, y1 = max(0, x1 - dx), max(0, y1 - dy)
+        x2, y2 = min(w, x2 + dx), min(h, y2 + dy)
         recorte = frame[y1:y2, x1:x2]
         if recorte.size == 0:
             recorte = frame
-        ok, buf = cv2.imencode(".jpg", recorte, [cv2.IMWRITE_JPEG_QUALITY, 85])
+        ok, buf = cv2.imencode(".jpg", recorte, [cv2.IMWRITE_JPEG_QUALITY, 90])
         return buf.tobytes() if ok else None
 
     def evaluar_antispoof(self, frame: np.ndarray, cara: dict) -> dict | None:

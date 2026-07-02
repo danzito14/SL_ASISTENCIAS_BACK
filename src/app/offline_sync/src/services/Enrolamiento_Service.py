@@ -20,7 +20,8 @@ from sqlalchemy.orm import Session
 
 from src.core.auth import Principal, es_admin
 from src.core.config import settings
-from src.schemas.Enrolamiento_Schema import EnrolamientoResponse, ItemRechazado
+from src.schemas.Enrolamiento_Schema import (EnrolamientoResponse, ItemEnrolado,
+                                             ItemRechazado)
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +62,7 @@ class EnrolamientoService:
 
     def enrolar(self, db: Session, items, principal: Principal) -> EnrolamientoResponse:
         creados = actualizados = asignados = 0
+        enrolados: list[ItemEnrolado] = []
         rechazados: list[ItemRechazado] = []
         for idx, it in enumerate(items):
             motivo = self._validar(it, principal)
@@ -72,10 +74,17 @@ class EnrolamientoService:
                     if it.id_trabajador is not None:
                         self._asignar_rostro(db, it, principal)
                         asignados += 1
-                    elif self._enrolar_walkin(db, it):
-                        creados += 1
+                        enrolados.append(ItemEnrolado(
+                            indice=idx, id_trabajador=it.id_trabajador, modo="asignado"))
                     else:
-                        actualizados += 1
+                        id_trab, insertado = self._enrolar_walkin(db, it)
+                        if insertado:
+                            creados += 1
+                        else:
+                            actualizados += 1
+                        enrolados.append(ItemEnrolado(
+                            indice=idx, id_local=it.id_local, id_trabajador=id_trab,
+                            modo="walkin", creado=insertado))
             except ValueError as e:  # rechazo de negocio (trabajador/empresa)
                 rechazados.append(self._rechazo(idx, it, str(e)))
             except Exception as exc:  # error de BD (FK, etc.)
@@ -83,7 +92,8 @@ class EnrolamientoService:
                 rechazados.append(self._rechazo(idx, it, str(getattr(exc, "orig", exc)).splitlines()[0][:200]))
         db.commit()
         return EnrolamientoResponse(creados=creados, actualizados=actualizados,
-                                    asignados=asignados, rechazados=rechazados)
+                                    asignados=asignados, enrolados=enrolados,
+                                    rechazados=rechazados)
 
     # ── Validación previa (sin BD) ─────────────────────────────────────────────
     def _validar(self, it, principal: Principal) -> str | None:
@@ -109,8 +119,8 @@ class EnrolamientoService:
             "calidad": it.calidad, "modelo": it.modelo_ia or settings.ENROL_MODELO_IA,
         })
 
-    # ── Modo WALK-IN (alta nueva). Devuelve True si CREÓ, False si actualizó ────
-    def _enrolar_walkin(self, db: Session, it) -> bool:
+    # ── Modo WALK-IN (alta nueva). Devuelve (id_trabajador, insertado) ─────────
+    def _enrolar_walkin(self, db: Session, it) -> tuple[int, bool]:
         row = db.execute(_SQL_TRABAJADOR, {
             "id_emp": it.id_local, "origen": settings.ENROL_ORIGEN,
             "nombre": it.nombre, "apellido": it.apellido, "id_area": it.id_area,
@@ -120,7 +130,7 @@ class EnrolamientoService:
             "id_trab": row.id_trabajador, "vec": _vector(it.embedding),
             "calidad": it.calidad, "modelo": it.modelo_ia or settings.ENROL_MODELO_IA,
         })
-        return bool(row.insertado)
+        return row.id_trabajador, bool(row.insertado)
 
     def _rechazo(self, idx, it, motivo) -> ItemRechazado:
         return ItemRechazado(indice=idx, id_local=it.id_local,
