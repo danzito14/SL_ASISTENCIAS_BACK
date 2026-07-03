@@ -175,7 +175,8 @@ class SyncService:
                 r.errores += 1
                 self._registrar_pendiente(
                     db, str(fila.get("id_emp")), origen, None, None, motivo,
-                    detalle=f"area_codigo={fila.get('area_codigo')} area_nombre={fila.get('area_nombre')}",
+                    detalle=f"empresa={fila.get('empresa_origen')} "
+                            f"area_codigo={fila.get('area_codigo')} area_nombre={fila.get('area_nombre')}",
                 )
                 continue
 

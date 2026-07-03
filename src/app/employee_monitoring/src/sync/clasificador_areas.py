@@ -74,6 +74,11 @@ GRUPO_POR_DEPARTAMENTO_COM: dict[str, str] = {
     "empaque": "empaque",
     "fijos no fijos planta sl": "empaque",
     "fijo empacadora": "empaque",
+    "emapque": "empaque",                 # typo de 'empaque' visto en SYS21
+    # Variantes vistas en SYS21 (area_invalida):
+    "mango": "campo",                     # (dict tenía 'huerta de mango')
+    "todo santos fijos": "campo",         # (dict tenía 'todos santos')
+    "gasolina fija caco": "oficina",      # (dict tenía 'gasolina fija')
 }
 
 # Overrides puntuales por departamento (sobre el default del grupo). Clave NORMALIZADA.
@@ -146,6 +151,11 @@ GRUPO_POR_PUESTO_AGRICOLA: dict[str, str] = {
     "aux. de riego": "campo",
     "monitoreo caco campo": "campo",
     "aplicador de fungicida": "campo",
+    # Variantes/typos vistos en SYS21 (area_invalida): normalizados a mano.
+    "supervisor campo viva organica": "campo",
+    "spervisor corte-chile": "campo",     # typo en la fuente (falta la 'U')
+    "caco- velador": "campo",             # variante con espacio de 'caco-velador'
+    "fuguero agropotato": "campo",
 }
 OVERRIDE_POR_PUESTO_AGRICOLA: dict[str, dict] = {}
 
