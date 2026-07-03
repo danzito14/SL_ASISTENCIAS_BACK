@@ -402,13 +402,14 @@ services:
       # /run/secrets/fotos/fotos_ssh_key (ver FOTOS_SFTP_KEY_PATH).
       - ${FOTOS_SSH_KEY_DIR:-./secrets}:/run/secrets/fotos:ro
     labels:
-      - "traefik.enable=false"   # interno: sync + admin. No expuesto por el gateway.
-      # Para exponer SOLO los endpoints de consulta/admin bajo /emp_sync, descomenta:
-      # - "traefik.enable=true"
-      # - "traefik.http.routers.empmon.rule=PathPrefix(`/emp_sync`)"
-      # - "traefik.http.routers.empmon.entrypoints=web"
-      # - "traefik.http.routers.empmon.middlewares=jwt-auth@file,gateway-token@docker,rate-limit@file,secure-headers@file"
-      # - "traefik.http.services.empmon.loadbalancer.server.port=8000"
+      # Expuesto por el gateway bajo /emp_sync (y /api/emp_sync que recorta api-strip),
+      # para que el panel admin dispare el sync/fotos a mano. Protegido por JWT +
+      # scope emp_sync:read/write (el kiosko NO lo tiene). El scheduler interno sigue igual.
+      - "traefik.enable=true"
+      - "traefik.http.routers.empmon.rule=PathPrefix(`/emp_sync`) || PathPrefix(`/api/emp_sync`)"
+      - "traefik.http.routers.empmon.entrypoints=web"
+      - "traefik.http.routers.empmon.middlewares=api-strip@file,jwt-auth@file,gateway-token@docker,rate-limit@file,secure-headers@file"
+      - "traefik.http.services.empmon.loadbalancer.server.port=8000"
 
   # ── Microservicio offline_sync (roster + ingesta del APK kiosko offline) ────
   # Entrega el roster (trabajadores+embeddings+áreas+puertas) al APK para reconocer
