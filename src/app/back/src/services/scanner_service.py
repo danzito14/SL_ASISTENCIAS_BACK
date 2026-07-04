@@ -23,6 +23,7 @@ from fastapi import HTTPException, status
 from src.models.Escaneo_Model import Escaneo
 from src.models.Incidencia_Model import Incidencia
 from src.models.IntentoAcceso_Model import IntentoAcceso
+from src.models.AreaTrabajo_Trabajador_Model import Trabajador
 from src.schemas.Asistencia_HistorialAuditoria import ScanResponse
 from src.schemas.AreaTrabajo_Trabajador import TrabajadorBrief
 from src.schemas._geo import punto_desde_latlon
@@ -172,6 +173,30 @@ class ScannerService:
         logger.warning("Incidencia 'acceso_otra_empresa': incidencia=%s trabajador=%s puerta=%s",
                        incidencia.id_incidencia, cand["id_trabajador"], id_puerta)
 
+    def _trabajador_super_global(self, cand: dict | None, id_empresa_puerta: int | None,
+                                 db: Session) -> dict | None:
+        """
+        Si el candidato GLOBAL (match en cualquier empresa) es un match bueno de OTRA
+        empresa y ese trabajador tiene permiso_escaneo='super', devuelve su dict de
+        trabajador para CONCEDER el acceso (ficha en SU empresa). Si no, None.
+        El 'super' fichar en cualquier lado se decidió aquí, en la clasificación,
+        porque el reconocimiento es por empresa (a otra empresa sale 'no_match').
+        """
+        if not cand:
+            return None
+        sim = cand.get("similitud")
+        if sim is None or sim < SIMILITUD_UMBRAL:
+            return None
+        if cand.get("id_empresa") == id_empresa_puerta:
+            return None  # misma empresa: lo maneja el match normal, no esta ruta
+        trab = (db.query(Trabajador)
+                  .filter(Trabajador.id_trabajador == cand["id_trabajador"])
+                  .first())
+        if trab is None or trab.estado != "activo" or trab.permiso_escaneo != "super":
+            return None
+        return {"id_trabajador": trab.id_trabajador, "nombre": trab.nombre,
+                "apellido": trab.apellido, "id_empresa": trab.id_empresa, "similitud": sim}
+
     # ── Registro del escaneo exitoso (común a foto y liveness) ─────────────────
     def _registrar_match(self, res: dict, recorte: bytes | None, id_puerta: int, tipo_registro: str,
                          id_dispositivo: int | None, db: Session, latitud, longitud, observaciones: str) -> ScanResponse:
@@ -275,6 +300,15 @@ class ScannerService:
             self._guardar_intento("spoofing", recorte, id_puerta, db)
             return _rechazo(f"Anti-spoofing: posible foto o pantalla (score real={res.get('score_real', 0):.2f}).")
         if estado == "no_match":
+            # 'super' de otra empresa: si el candidato global es un match bueno con
+            # permiso 'super', se CONCEDE (ficha en su empresa) en vez de rechazarlo.
+            trab_super = self._trabajador_super_global(res.get("candidato_global"), id_empresa, db)
+            if trab_super is not None:
+                return self._procesar_match(
+                    {"trabajador": trab_super}, recorte, id_puerta, tipo_registro,
+                    id_dispositivo, db, latitud, longitud,
+                    observaciones=(f"Acceso 'super' (empresa {trab_super['id_empresa']}) en "
+                                   f"puerta de otra empresa. Similitud: {trab_super['similitud']:.4f}"))
             self._clasificar_no_match(recorte, res.get("det_score", 0.0), res.get("candidato_global"), id_puerta, id_empresa, db)
             return _rechazo("Rostro no reconocido en esta empresa.")
         # match
@@ -300,6 +334,15 @@ class ScannerService:
             self._guardar_intento("spoofing", recorte, id_puerta, db)
             return _rechazo(f"Anti-spoofing: posible foto o pantalla (score real={res.get('score_real', 0):.2f}).")
         if estado == "no_match":
+            # 'super' de otra empresa: si el candidato global es un match bueno con
+            # permiso 'super', se CONCEDE (ficha en su empresa) en vez de rechazarlo.
+            trab_super = self._trabajador_super_global(res.get("candidato_global"), id_empresa, db)
+            if trab_super is not None:
+                return self._procesar_match(
+                    {"trabajador": trab_super}, recorte, id_puerta, tipo_registro,
+                    id_dispositivo, db, latitud, longitud,
+                    observaciones=(f"Acceso 'super' (empresa {trab_super['id_empresa']}) en "
+                                   f"puerta de otra empresa. Similitud: {trab_super['similitud']:.4f}"))
             self._clasificar_no_match(recorte, res.get("det_score", 0.0), res.get("candidato_global"), id_puerta, id_empresa, db)
             return _rechazo("Rostro no reconocido en esta empresa.")
         # match
