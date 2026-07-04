@@ -5,13 +5,14 @@ Cada reporte se acota por la empresa del usuario (None = super-admin → todas).
 """
 import csv
 import io
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
 from fastapi import HTTPException, status
 from fastapi.responses import StreamingResponse
+from sqlalchemy import func, text
 from sqlalchemy.orm import Session
 
 from src.models.AreaTrabajo_Trabajador_Model import AreaTrabajo, Trabajador
@@ -305,6 +306,110 @@ class ReporteService:
             ("area", "Área"), ("empresa", "Empresa"), ("estado", "Estado"),
         ]
         return self._exportar(columnas, filas, "trabajadores", formato)
+
+    # ── Dashboard (JSON, no archivo) ───────────────────────────────────────────
+    def _tz_empresa(self, db: Session, id_empresa: int | None) -> ZoneInfo:
+        if id_empresa is not None:
+            fila = db.query(Empresa.zona_horaria).filter(Empresa.id_empresa == id_empresa).first()
+            if fila and fila[0]:
+                try:
+                    return ZoneInfo(fila[0])
+                except Exception:
+                    pass
+        return ZoneInfo("America/Mazatlan")
+
+    def dashboard(self, db: Session, id_empresa: int | None, fecha: date | None = None) -> dict:
+        """
+        Números del día para el panel: presentes/total (global y por tipo de área),
+        ausentes, retardos, intentos, incidencias pendientes, y padrón con/sin rostro.
+        'presente' = tiene al menos una ENTRADA en el día (zona horaria de la empresa).
+        """
+        tz = self._tz_empresa(db, id_empresa)
+        dia = fecha or datetime.now(tz).date()
+        ini = datetime.combine(dia, time.min, tzinfo=tz).astimezone(timezone.utc)
+        fin = ini + timedelta(days=1)
+
+        def _emp(q, col):
+            return q.filter(col == id_empresa) if id_empresa is not None else q
+
+        # Total de trabajadores activos por tipo de área.
+        q_tot = (
+            db.query(AreaTrabajo.tipo_area, func.count(Trabajador.id_trabajador))
+            .join(Trabajador, Trabajador.id_area == AreaTrabajo.id_area)
+            .filter(Trabajador.estado == "activo")
+        )
+        q_tot = _emp(q_tot, Trabajador.id_empresa)
+        total_por_tipo = {(t or "sin_tipo"): n for t, n in q_tot.group_by(AreaTrabajo.tipo_area).all()}
+
+        # Presentes hoy (trabajadores DISTINTOS con entrada) por tipo de área.
+        q_pre = (
+            db.query(AreaTrabajo.tipo_area, func.count(func.distinct(Asistencia.id_trabajador)))
+            .join(Trabajador, Trabajador.id_trabajador == Asistencia.id_trabajador)
+            .join(AreaTrabajo, AreaTrabajo.id_area == Trabajador.id_area)
+            .filter(Asistencia.tipo_registro == "entrada",
+                    Asistencia.fecha_hora >= ini, Asistencia.fecha_hora < fin)
+        )
+        q_pre = _emp(q_pre, Asistencia.id_empresa)
+        pres_por_tipo = {(t or "sin_tipo"): n for t, n in q_pre.group_by(AreaTrabajo.tipo_area).all()}
+
+        tipos = set(total_por_tipo) | set(pres_por_tipo)
+        por_tipo = {
+            t: {"total": total_por_tipo.get(t, 0), "presentes": pres_por_tipo.get(t, 0)}
+            for t in sorted(tipos)
+        }
+        total = sum(total_por_tipo.values())
+        presentes = sum(pres_por_tipo.values())
+
+        # Retardos de hoy: 1ª entrada del día por trabajador vs hora_entrada del área.
+        q_ret = (
+            db.query(Asistencia.id_trabajador, Asistencia.fecha_hora, AreaTrabajo.hora_entrada)
+            .join(Trabajador, Trabajador.id_trabajador == Asistencia.id_trabajador)
+            .join(AreaTrabajo, AreaTrabajo.id_area == Trabajador.id_area)
+            .filter(Asistencia.tipo_registro == "entrada", AreaTrabajo.hora_entrada.isnot(None),
+                    Asistencia.fecha_hora >= ini, Asistencia.fecha_hora < fin)
+        )
+        q_ret = _emp(q_ret, Asistencia.id_empresa)
+        primeras: dict[int, tuple] = {}
+        for id_t, fh, he in q_ret.order_by(Asistencia.fecha_hora.asc()).all():
+            if id_t not in primeras:
+                primeras[id_t] = (fh, he)
+        retardos = 0
+        for fh, he in primeras.values():
+            local = (fh if fh.tzinfo else fh.replace(tzinfo=timezone.utc)).astimezone(tz)
+            if (local.hour * 60 + local.minute) > (he.hour * 60 + he.minute):
+                retardos += 1
+
+        # Intentos de hoy.
+        q_int = db.query(func.count(IntentoAcceso.id_intento)).filter(
+            IntentoAcceso.fecha >= ini, IntentoAcceso.fecha < fin)
+        q_int = _emp(q_int, IntentoAcceso.id_empresa)
+        intentos = q_int.scalar() or 0
+
+        # Incidencias PENDIENTES (todas las abiertas, no solo hoy).
+        q_inc = db.query(func.count(Incidencia.id_incidencia)).filter(Incidencia.estado == "pendiente")
+        q_inc = _emp(q_inc, Incidencia.id_empresa)
+        incidencias_pend = q_inc.scalar() or 0
+
+        # Padrón con/sin rostro (embeddings; reports no tiene modelo Embedding → SQL crudo).
+        con_rostro = db.execute(text(
+            "SELECT count(DISTINCT e.id_trabajador) FROM embeddings e "
+            "JOIN trabajadores t ON t.id_trabajador = e.id_trabajador "
+            "WHERE t.estado='activo' AND (:emp IS NULL OR t.id_empresa = :emp)"
+        ), {"emp": id_empresa}).scalar() or 0
+
+        return {
+            "fecha": dia.isoformat(),
+            "empresa": id_empresa,
+            "trabajadores": {"total": total, "con_rostro": con_rostro, "sin_rostro": max(0, total - con_rostro)},
+            "asistencia": {
+                "presentes": presentes,
+                "ausentes": max(0, total - presentes),
+                "por_tipo": por_tipo,          # {oficina:{total,presentes}, empaque:..., campo:...}
+            },
+            "retardos_hoy": retardos,
+            "intentos_hoy": intentos,
+            "incidencias_pendientes": incidencias_pend,
+        }
 
 
 reporte_service = ReporteService()

@@ -14,6 +14,22 @@ router = APIRouter(prefix="/reportes", tags=["Reportes"])
 
 Formato = Literal["xlsx", "csv"]
 
+
+# ── Dashboard (JSON con los números del día) ──────────────────────────────────
+@router.get(
+    "/dashboard",
+    summary="Panel del día (presentes/total, por tipo de área, retardos, intentos…)",
+    description="Números en vivo para el panel: presentes/total del día (global y por "
+                "oficina/empaque/campo), ausentes, retardos, intentos, incidencias "
+                "pendientes y padrón con/sin rostro. Acotado a tu empresa.",
+)
+def dashboard(
+    fecha: date | None = Query(None, description="Día a consultar (YYYY-MM-DD). Vacío = hoy."),
+    id_empresa: int | None = Depends(resolver_empresa_scope),
+    db: Session = Depends(get_db),
+):
+    return reporte_service.dashboard(db, id_empresa, fecha)
+
 # Respuestas binarias (archivo descargable) — se documentan así en Swagger.
 _FILE_RESPONSES = {
     200: {

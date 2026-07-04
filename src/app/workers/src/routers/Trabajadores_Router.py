@@ -50,12 +50,16 @@ def listar_trabajadores(
     id_empresa: int | None = Depends(resolver_empresa_scope),
     skip: int = Query(0, ge=0),
     limit: int = Query(100, ge=1, le=500),
-    id_area: int | None = Query(None, description="Filtrar por área (opcional, dentro de la empresa)."),
-    nombre: str | None = Query(None, description="Buscar por nombre (parcial, insensible a mayúsculas)."),
+    id_area: int | None = Query(None, description="Filtrar por área (dentro de la empresa)."),
+    nombre: str | None = Query(None, description="Buscar por nombre/apellido (parcial, insensible a mayúsculas)."),
+    id_emp: str | None = Query(None, description="Buscar por número de empleado SYS21 (parcial)."),
+    con_rostro: bool | None = Query(
+        None, description="true = solo con rostro registrado; false = solo SIN rostro; vacío = todos."),
     db: Session = Depends(get_db),
 ):
     return trabajador_service.listar_trabajadores(
-        db=db, skip=skip, limit=limit, id_empresa=id_empresa, id_area=id_area, nombre=nombre
+        db=db, skip=skip, limit=limit, id_empresa=id_empresa, id_area=id_area,
+        nombre=nombre, id_emp=id_emp, con_rostro=con_rostro,
     )
 
 

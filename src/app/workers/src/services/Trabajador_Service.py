@@ -80,9 +80,12 @@ class TrabajadorService:
         id_empresa: int | None = None,
         id_area: int | None = None,
         nombre: str | None = None,
+        id_emp: str | None = None,
+        con_rostro: bool | None = None,
     ) -> list[Trabajador]:
         """
-        Devuelve los trabajadores registrados, ordenados por id.
+        Devuelve los trabajadores registrados, ordenados por id. Todos los filtros
+        se COMPONEN (se aplican juntos).
 
         Args:
             db:         Sesión de BD
@@ -90,6 +93,10 @@ class TrabajadorService:
             limit:      Máximo de registros a devolver
             id_empresa: Si se indica, solo trabajadores de esa empresa (vía su área).
             id_area:    Si se indica, solo trabajadores de esa área.
+            nombre:     Búsqueda parcial por nombre/apellido (insensible a mayúsculas).
+            id_emp:     Búsqueda parcial por número de empleado (SYS21).
+            con_rostro: True = solo con embedding facial; False = solo SIN embedding;
+                        None = todos.
 
         Returns:
             Lista de trabajadores.
@@ -106,6 +113,16 @@ class TrabajadorService:
                     Trabajador.apellido.ilike(f"%{nombre}%"),
                 )
             )
+        if id_emp is not None:
+            query = query.filter(Trabajador.id_emp.ilike(f"%{id_emp}%"))
+        if con_rostro is not None:
+            # Correlacionado: ¿tiene (o no) embedding facial?
+            existe = (
+                db.query(Embedding.id_embedding)
+                .filter(Embedding.id_trabajador == Trabajador.id_trabajador)
+                .exists()
+            )
+            query = query.filter(existe if con_rostro else ~existe)
 
         trabajadores = (
             query

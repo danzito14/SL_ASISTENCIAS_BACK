@@ -10,6 +10,7 @@ Scopes (derivados del primer segmento del path → recurso 'emp_sync'):
 import logging
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from src.core.auth import Principal, exigir_empresa, resolver_empresa_scope, usuario_actual
@@ -129,6 +130,52 @@ def listar_fotos_pendientes(
     if origen is not None:
         query = query.filter(FotoPendiente.origen_nomina == origen)
     return query.order_by(FotoPendiente.fecha.desc()).offset(skip).limit(limit).all()
+
+
+@router.get(
+    "/fotos-pendientes/resumen",
+    summary="Conteo de fotos pendientes por motivo",
+    description="Agrupa las fotos pendientes por (origen, motivo) con su total. Para el "
+                "tablero de calidad de fotos. Por defecto solo las 'pendiente'.",
+)
+def resumen_fotos_pendientes(
+    db: Session = Depends(get_db),
+    id_empresa: int | None = Depends(resolver_empresa_scope),
+    estado: str | None = Query("pendiente", description="pendiente | resuelto | ignorado | (vacío = todas)"),
+):
+    q = db.query(FotoPendiente.origen_nomina, FotoPendiente.motivo,
+                 func.count(FotoPendiente.id_pendiente).label("total"))
+    if id_empresa is not None:
+        q = q.filter(FotoPendiente.id_empresa == id_empresa)
+    if estado:
+        q = q.filter(FotoPendiente.estado == estado)
+    filas = (q.group_by(FotoPendiente.origen_nomina, FotoPendiente.motivo)
+              .order_by(func.count(FotoPendiente.id_pendiente).desc()).all())
+    return [{"origen_nomina": o, "motivo": m, "total": n} for o, m, n in filas]
+
+
+@router.get(
+    "/fotos-pendientes/areas-invalidas",
+    summary="Áreas/puestos SIN clasificar (area_invalida) por origen",
+    description="Desglose de los rechazos 'area_invalida' por su detalle "
+                "(empresa/area_codigo/area_nombre), ordenado por cuántos trabajadores "
+                "arrastra cada uno. Sirve para saber qué áreas etiquetar o mapear. "
+                "Nota: 'area_invalida' viene sin empresa, así que lo ve el super-admin.",
+)
+def areas_invalidas(
+    db: Session = Depends(get_db),
+    id_empresa: int | None = Depends(resolver_empresa_scope),
+    limite: int = Query(100, ge=1, le=1000),
+):
+    q = (db.query(FotoPendiente.origen_nomina, FotoPendiente.detalle,
+                  func.count(FotoPendiente.id_pendiente).label("total"))
+           .filter(FotoPendiente.motivo == "area_invalida",
+                   FotoPendiente.estado == "pendiente"))
+    if id_empresa is not None:
+        q = q.filter(FotoPendiente.id_empresa == id_empresa)
+    filas = (q.group_by(FotoPendiente.origen_nomina, FotoPendiente.detalle)
+              .order_by(func.count(FotoPendiente.id_pendiente).desc()).limit(limite).all())
+    return [{"origen_nomina": o, "detalle": d, "total": n} for o, d, n in filas]
 
 
 @router.patch(
