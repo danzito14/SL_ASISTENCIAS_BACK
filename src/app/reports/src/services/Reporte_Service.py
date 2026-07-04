@@ -335,6 +335,7 @@ class ReporteService:
         # Total de trabajadores activos por tipo de área.
         q_tot = (
             db.query(AreaTrabajo.tipo_area, func.count(Trabajador.id_trabajador))
+            .select_from(AreaTrabajo)
             .join(Trabajador, Trabajador.id_area == AreaTrabajo.id_area)
             .filter(Trabajador.estado == "activo")
         )
@@ -344,6 +345,7 @@ class ReporteService:
         # Presentes hoy (trabajadores DISTINTOS con entrada) por tipo de área.
         q_pre = (
             db.query(AreaTrabajo.tipo_area, func.count(func.distinct(Asistencia.id_trabajador)))
+            .select_from(Asistencia)
             .join(Trabajador, Trabajador.id_trabajador == Asistencia.id_trabajador)
             .join(AreaTrabajo, AreaTrabajo.id_area == Trabajador.id_area)
             .filter(Asistencia.tipo_registro == "entrada",
@@ -363,6 +365,7 @@ class ReporteService:
         # Retardos de hoy: 1ª entrada del día por trabajador vs hora_entrada del área.
         q_ret = (
             db.query(Asistencia.id_trabajador, Asistencia.fecha_hora, AreaTrabajo.hora_entrada)
+            .select_from(Asistencia)
             .join(Trabajador, Trabajador.id_trabajador == Asistencia.id_trabajador)
             .join(AreaTrabajo, AreaTrabajo.id_area == Trabajador.id_area)
             .filter(Asistencia.tipo_registro == "entrada", AreaTrabajo.hora_entrada.isnot(None),
@@ -391,11 +394,14 @@ class ReporteService:
         incidencias_pend = q_inc.scalar() or 0
 
         # Padrón con/sin rostro (embeddings; reports no tiene modelo Embedding → SQL crudo).
-        con_rostro = db.execute(text(
-            "SELECT count(DISTINCT e.id_trabajador) FROM embeddings e "
-            "JOIN trabajadores t ON t.id_trabajador = e.id_trabajador "
-            "WHERE t.estado='activo' AND (:emp IS NULL OR t.id_empresa = :emp)"
-        ), {"emp": id_empresa}).scalar() or 0
+        sql_cr = ("SELECT count(DISTINCT e.id_trabajador) FROM embeddings e "
+                  "JOIN trabajadores t ON t.id_trabajador = e.id_trabajador "
+                  "WHERE t.estado='activo'")
+        params_cr: dict = {}
+        if id_empresa is not None:
+            sql_cr += " AND t.id_empresa = :emp"
+            params_cr["emp"] = id_empresa
+        con_rostro = db.execute(text(sql_cr), params_cr).scalar() or 0
 
         return {
             "fecha": dia.isoformat(),

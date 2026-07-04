@@ -8,6 +8,7 @@ class AreaTrabajo(Base):
     id_area      = Column(Integer, primary_key=True)
     nombre_area  = Column(String(100))
     id_empresa   = Column(Integer)
+    tipo_area    = Column(String(20))   # 'oficina' | 'empaque' | 'campo' (para el dashboard)
     hora_entrada = Column(Time)   # hora de entrada esperada (para calcular retardos)
 
 

@@ -35,3 +35,4 @@ uvicorn==0.30.6
 watchfiles==1.2.0
 websockets==16.0
 gunicorn==23.0.0
+tzdata==2024.2          # base de zonas horarias (python:slim no la trae) → ZoneInfo
