@@ -55,6 +55,11 @@ def _scope_requerido(method: str, path: str) -> str:
     recurso = path.strip("/").split("/")[0] if path.strip("/") else ""
     if recurso == "scanner":
         return "scanner:use"
+    # El dashboard (panel de inicio) tiene su PROPIO permiso otorgable: así puedes
+    # dar SOLO el panel a un rol (scope "dashboard:read") sin concederle la descarga
+    # de reportes. Lo cubren "*" y "*:read"; tener solo "reportes:read" NO lo concede.
+    if path.rstrip("/") == "/reportes/dashboard":
+        return "dashboard:read"
     accion = ACCION_POR_METODO.get(method, "write")
     return f"{recurso}:{accion}"
 

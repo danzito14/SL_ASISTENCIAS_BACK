@@ -1333,7 +1333,9 @@ INSERT INTO roles (nombre_rol, descripcion, permisos, estado) VALUES
     ('configuracion', 'Gestiona empresas, áreas, puertas y dispositivos. No borra.',
         '{"scopes": ["empresas:read", "empresas:write", "areas:read", "areas:write", "puertas:read", "puertas:write", "dispositivos:read", "dispositivos:write"]}'::jsonb, 'activo'),
     ('reportes',      'Tableros/exportes: reportes, asistencias, incidencias, intentos, escaneos, trabajadores.',
-        '{"scopes": ["reportes:read", "asistencias:read", "incidencias:read", "intentos:read", "escaneos:read", "trabajadores:read"]}'::jsonb, 'activo')
+        '{"scopes": ["reportes:read", "asistencias:read", "incidencias:read", "intentos:read", "escaneos:read", "trabajadores:read"]}'::jsonb, 'activo'),
+    ('dashboard',     'Solo el panel de inicio (métricas del día). NO descarga reportes.',
+        '{"scopes": ["dashboard:read"]}'::jsonb, 'activo')
 ON CONFLICT (nombre_rol) DO NOTHING;
 
 
