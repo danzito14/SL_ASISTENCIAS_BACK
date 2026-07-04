@@ -2,10 +2,10 @@
 from datetime import date
 from typing import Literal
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy.orm import Session
 
-from src.core.auth import resolver_empresa_scope
+from src.core.auth import es_admin, resolver_empresa_scope, usuario_actual
 from src.core.pgdb import get_db
 from src.schemas.Incidencia_Schema import TipoIncidencia
 from src.services.Reporte_Service import reporte_service
@@ -24,11 +24,21 @@ Formato = Literal["xlsx", "csv"]
                 "pendientes y padrón con/sin rostro. Acotado a tu empresa.",
 )
 def dashboard(
+    request: Request,
     fecha: date | None = Query(None, description="Día a consultar (YYYY-MM-DD). Vacío = hoy."),
-    id_empresa: int | None = Depends(resolver_empresa_scope),
+    id_empresa: int | None = Query(
+        None,
+        description="Solo admin: empresa a ver. Vacío = empresa 1 (default); 0 = TODAS. "
+                    "Un usuario normal siempre ve su propia empresa (este parámetro se ignora)."),
     db: Session = Depends(get_db),
 ):
-    return reporte_service.dashboard(db, id_empresa, fecha)
+    principal = usuario_actual(request)
+    if es_admin(principal):
+        # Admin: sin valor → empresa 1 (default); 0 → todas; otro → esa empresa.
+        emp = 1 if id_empresa is None else (None if id_empresa == 0 else id_empresa)
+    else:
+        emp = principal.empresa      # usuario normal: siempre su empresa
+    return reporte_service.dashboard(db, emp, fecha)
 
 # Respuestas binarias (archivo descargable) — se documentan así en Swagger.
 _FILE_RESPONSES = {
