@@ -90,8 +90,15 @@ BEGIN
         END IF;
 
         -- ── Capa 3: geolocalización (solo si pasó 1 y 2) ──────────────────
-        IF v_nuevo_estado IS NULL THEN
-            IF v_tipo_puerta = 'campo' THEN
+        IF v_nuevo_estado IS NULL AND v_permiso = 'super' THEN
+            -- 'super' ficha en cualquier lado → exento de la geocerca.
+            v_geo_indet := TRUE;
+        ELSIF v_nuevo_estado IS NULL THEN
+            -- Geocerca: puerta de campo + trabajador de campo = su ÁREA asignada
+            -- (verifica al jornalero en su campo). En cualquier otro caso
+            -- (general/administrativo, o campo en puerta administrativa) = polígono
+            -- de la EMPRESA (roaming dentro de la empresa).
+            IF v_tipo_puerta = 'campo' AND v_permiso = 'campo' THEN
                 SELECT a.ubicacion INTO v_poligono
                   FROM trabajadores t
                   JOIN area_trabajo a ON a.id_area = t.id_area
@@ -102,8 +109,7 @@ BEGIN
             END IF;
 
             IF v_poligono IS NULL OR r.ubicacion IS NULL THEN
-                -- Sin datos para juzgar (offline sin GPS o área sin geocerca):
-                -- NO penalizar. Geo indeterminada → se conserva dentro_de_area cliente.
+                -- Sin datos para juzgar (offline sin GPS o sin geocerca): NO penalizar.
                 v_geo_indet := TRUE;
             ELSE
                 v_dentro := ST_Covers(v_poligono, r.ubicacion);
