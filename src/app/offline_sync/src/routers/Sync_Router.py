@@ -55,11 +55,12 @@ def _meta_modelo(nombre: str) -> dict:
     response_model=RosterResponse,
     summary="Roster (trabajadores + embeddings + áreas + puertas) para operar offline",
     description="Acotado a la empresa del usuario kiosko y al `tipo` del dispositivo "
-                "(campo|oficina|empaque). Regla A: estricto por tipo de área + 'super'.",
+                "(campo|oficina|empaque|mixto). 'mixto' = oficina + empaque juntos "
+                "(entrada compartida). Regla A: estricto por tipo de área + 'super'.",
 )
 def obtener_roster(
     request: Request,
-    tipo: str = Query(..., description="Tipo de fichaje del dispositivo: campo | oficina | empaque"),
+    tipo: str = Query(..., description="Tipo de fichaje del dispositivo: campo | oficina | empaque | mixto"),
     id_empresa: int | None = Depends(resolver_empresa_scope),
     db: Session = Depends(get_db),
 ):
@@ -71,10 +72,12 @@ def obtener_roster(
             detail="Indica una empresa concreta (?id_empresa=) para bajar su roster.",
         )
     t = tipo.strip().lower()
-    if t not in settings.roster_tipos_set:
+    # 'mixto' es un tipo virtual (oficina+empaque); no está en roster_tipos_set.
+    validos = settings.roster_tipos_set | {"mixto"}
+    if t not in validos:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"tipo inválido '{tipo}'. Válidos: {sorted(settings.roster_tipos_set)}.",
+            detail=f"tipo inválido '{tipo}'. Válidos: {sorted(validos)}.",
         )
     return roster_service.construir_roster(db, empresa, t)
 

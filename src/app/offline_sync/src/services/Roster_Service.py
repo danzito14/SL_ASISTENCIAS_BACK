@@ -35,7 +35,7 @@ _SQL_TRABAJADORES = text("""
     JOIN embeddings   e ON e.id_trabajador = t.id_trabajador AND e.estado = 'activo'
     WHERE t.id_empresa = :empresa
       AND t.estado = 'activo'
-      AND ( a.tipo_area = :tipo
+      AND ( a.tipo_area = ANY(:tipos)
             OR t.permiso_escaneo = 'super'
             OR (CAST(:incluir_general AS boolean) AND t.permiso_escaneo = 'general') )
     ORDER BY t.id_trabajador
@@ -44,7 +44,7 @@ _SQL_TRABAJADORES = text("""
 _SQL_AREAS = text("""
     SELECT id_area, nombre_area, tipo_area, ST_AsGeoJSON(ubicacion) AS poligono
     FROM area_trabajo
-    WHERE id_empresa = :empresa AND tipo_area = :tipo AND estado = 'activo'
+    WHERE id_empresa = :empresa AND tipo_area = ANY(:tipos) AND estado = 'activo'
     ORDER BY id_area
 """)
 
@@ -53,7 +53,7 @@ _SQL_PUERTAS = text("""
     FROM puertas_acceso p
     JOIN area_trabajo a ON a.id_area = p.id_area
     WHERE p.id_empresa = :empresa AND p.funcion_puerta = 'asistencia'
-      AND a.tipo_area = :tipo AND p.estado = 'activo'
+      AND a.tipo_area = ANY(:tipos) AND p.estado = 'activo'
     ORDER BY p.id_puerta
 """)
 
@@ -90,7 +90,9 @@ def _parse_vec(s: str | None) -> list[float]:
 class RosterService:
 
     def construir_roster(self, db: Session, empresa: int, tipo: str) -> RosterResponse:
-        params = {"empresa": empresa, "tipo": tipo,
+        # 'mixto' baja oficina + empaque juntos (lugares con entrada compartida).
+        tipos = ["oficina", "empaque"] if tipo == "mixto" else [tipo]
+        params = {"empresa": empresa, "tipos": tipos,
                   "incluir_general": settings.ROSTER_INCLUIR_GENERAL}
 
         filas = db.execute(_SQL_TRABAJADORES, params).all()
@@ -109,12 +111,12 @@ class RosterService:
         areas = [
             RosterArea(id_area=a.id_area, nombre_area=a.nombre_area,
                        tipo_area=a.tipo_area, poligono_geojson=a.poligono)
-            for a in db.execute(_SQL_AREAS, {"empresa": empresa, "tipo": tipo}).all()
+            for a in db.execute(_SQL_AREAS, {"empresa": empresa, "tipos": tipos}).all()
         ]
         puertas = [
             RosterPuerta(id_puerta=p.id_puerta, nombre_puerta=p.nombre_puerta,
                          tipo_puerta=p.tipo_puerta, id_area=p.id_area)
-            for p in db.execute(_SQL_PUERTAS, {"empresa": empresa, "tipo": tipo}).all()
+            for p in db.execute(_SQL_PUERTAS, {"empresa": empresa, "tipos": tipos}).all()
         ]
 
         version = self._version(empresa, tipo, filas)
