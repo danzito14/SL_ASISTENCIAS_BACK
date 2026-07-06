@@ -16,9 +16,11 @@ from sqlalchemy.orm import Session
 from src.core.auth import Principal, exigir_empresa, resolver_empresa_scope, usuario_actual
 from src.core.config import settings
 from src.core.pgdb import SessionLocal, get_db
-from src.models.FotoPendiente_Model import FotoPendiente
+from src.models.AreaTrabajo_Trabajador_Model import Trabajador
+from src.models.FotoPendiente_Model import MOTIVOS, FotoPendiente
 from src.models.SyncEstado_Model import SyncEstado
-from src.schemas.FotoPendiente_Schema import FotoPendienteResponse, FotoPendienteUpdate
+from src.schemas.FotoPendiente_Schema import (FotoPendienteResponse,
+                                              FotoPendienteUpdate, MotivoCatalogo)
 from src.schemas.Sync_Schema import SyncEstadoResponse, SyncRunAceptado
 from src.sync.Sync_Service import sync_service
 
@@ -118,18 +120,29 @@ def listar_fotos_pendientes(
     db: Session = Depends(get_db),
     id_empresa: int | None = Depends(resolver_empresa_scope),
     estado: str | None = Query("pendiente", description="pendiente | resuelto | ignorado | (vacío = todas)"),
-    origen: str | None = Query(None),
+    origen: str | None = Query(None, description="agricola | agricola_com"),
+    motivo: str | None = Query(None, description="Filtra por motivo (sin_foto, area_invalida, no_rostro, …)."),
     skip: int = 0,
     limit: int = Query(100, le=500),
 ):
-    query = db.query(FotoPendiente)
+    # LEFT JOIN a trabajadores para traer el nombre (area_invalida no tiene trabajador).
+    q = (db.query(FotoPendiente, Trabajador.nombre, Trabajador.apellido)
+           .outerjoin(Trabajador, Trabajador.id_trabajador == FotoPendiente.id_trabajador))
     if id_empresa is not None:
-        query = query.filter(FotoPendiente.id_empresa == id_empresa)
+        q = q.filter(FotoPendiente.id_empresa == id_empresa)
     if estado:
-        query = query.filter(FotoPendiente.estado == estado)
+        q = q.filter(FotoPendiente.estado == estado)
     if origen is not None:
-        query = query.filter(FotoPendiente.origen_nomina == origen)
-    return query.order_by(FotoPendiente.fecha.desc()).offset(skip).limit(limit).all()
+        q = q.filter(FotoPendiente.origen_nomina == origen)
+    if motivo is not None:
+        q = q.filter(FotoPendiente.motivo == motivo)
+
+    filas = q.order_by(FotoPendiente.fecha.desc()).offset(skip).limit(limit).all()
+    salida = []
+    for fp, nombre, apellido in filas:
+        fp.trabajador_nombre = f"{nombre} {apellido}".strip() if nombre else None
+        salida.append(fp)
+    return salida
 
 
 @router.get(
@@ -176,6 +189,39 @@ def areas_invalidas(
     filas = (q.group_by(FotoPendiente.origen_nomina, FotoPendiente.detalle)
               .order_by(func.count(FotoPendiente.id_pendiente).desc()).limit(limite).all())
     return [{"origen_nomina": o, "detalle": d, "total": n} for o, d, n in filas]
+
+
+# Etiquetas legibles de los motivos (para la leyenda/filtros del panel).
+_MOTIVO_LABEL: dict[str, str] = {
+    "sin_foto":                   "Sin foto en el servidor",
+    "area_invalida":              "Área/puesto sin clasificar",
+    "no_rostro":                  "No se detectó rostro",
+    "multiples_caras":            "Varias caras en la foto",
+    "det_score_bajo":             "Detección de baja calidad",
+    "cara_pequena":               "Rostro muy pequeño / lejano",
+    "pose_no_frontal":            "Rostro no frontal",
+    "borrosa":                    "Foto borrosa",
+    "spoofing":                   "Posible foto/pantalla (spoofing)",
+    "duplicado":                  "Rostro duplicado (ya registrado en otro)",
+    "recognition_no_disponible":  "Reconocimiento no disponible (reintentar)",
+    "formato_invalido":           "Formato de imagen inválido",
+    "resolucion_baja":            "Resolución baja",
+    "archivo_corrupto":           "Archivo corrupto",
+    "archivo_grande":             "Archivo demasiado grande",
+    "muy_oscura":                 "Foto muy oscura",
+    "muy_clara":                  "Foto muy clara / sobreexpuesta",
+}
+
+
+@router.get(
+    "/fotos-pendientes/motivos",
+    response_model=list[MotivoCatalogo],
+    summary="Catálogo de motivos de rechazo (con etiqueta legible)",
+    description="Todos los motivos posibles + su etiqueta para la UI (leyenda y filtros "
+                "del tablero), exista o no una foto con ese motivo ahora mismo.",
+)
+def catalogo_motivos():
+    return [MotivoCatalogo(motivo=m, label=_MOTIVO_LABEL.get(m, m)) for m in MOTIVOS]
 
 
 @router.patch(
