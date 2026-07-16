@@ -83,12 +83,13 @@ async def acceso_foto(
     id_dispositivo: int | None = None,
     latitud: float | None = None,
     longitud: float | None = None,
+    nombre_hint: str | None = None,
     db: Session = Depends(get_db),
 ):
     data = await _leer_bytes(foto)
     return await run_in_threadpool(
         scanner_service.procesar_foto_acceso,
-        data, id_puerta, tipo_registro, id_dispositivo, db, latitud, longitud,
+        data, id_puerta, tipo_registro, id_dispositivo, db, latitud, longitud, nombre_hint,
     )
 
 
@@ -106,6 +107,7 @@ async def acceso_liveness(
     id_dispositivo: int | None = None,
     latitud: float | None = None,
     longitud: float | None = None,
+    nombre_hint: str | None = None,
     db: Session = Depends(get_db),
 ):
     if len(fotos) < 2:
@@ -116,5 +118,5 @@ async def acceso_liveness(
     datos = [await _leer_bytes(f) for f in fotos]
     return await run_in_threadpool(
         scanner_service.procesar_fotos_acceso,
-        datos, id_puerta, tipo_registro, id_dispositivo, db, latitud, longitud,
+        datos, id_puerta, tipo_registro, id_dispositivo, db, latitud, longitud, nombre_hint,
     )

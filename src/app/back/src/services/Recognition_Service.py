@@ -33,15 +33,25 @@ class RecognitionClient:
             logger.error("recognition: fallo en %s: %s", ruta, exc)
             return None
 
-    def reconocer(self, foto_bytes: bytes, id_empresa: int | None) -> dict | None:
-        """1 imagen → pipeline completo (estado, trabajador/candidato, recorte_b64)."""
+    def reconocer(self, foto_bytes: bytes, id_empresa: int | None, nombre_hint: str | None = None) -> dict | None:
+        """1 imagen → pipeline completo (estado, trabajador/candidato, recorte_b64).
+
+        nombre_hint (opcional): nombre 'sucio' que un terminal/cámara detectó, para
+        ACOTAR la búsqueda facial a los trabajadores cuyo nombre coincida (indicio,
+        no identificador). Si no coincide con nadie, recognition cae a búsqueda total.
+        """
         data = {} if id_empresa is None else {"id_empresa": id_empresa}
+        if nombre_hint:
+            data["nombre_hint"] = nombre_hint
         return self._post("/reconocer", files={"foto": ("foto.jpg", foto_bytes, "image/jpeg")}, data=data)
 
-    def reconocer_liveness(self, fotos_bytes: list[bytes], id_empresa: int | None) -> dict | None:
-        """N imágenes → liveness + match."""
+    def reconocer_liveness(self, fotos_bytes: list[bytes], id_empresa: int | None,
+                           nombre_hint: str | None = None) -> dict | None:
+        """N imágenes → liveness + match. nombre_hint: ver reconocer()."""
         files = [("fotos", (f"f{i}.jpg", b, "image/jpeg")) for i, b in enumerate(fotos_bytes)]
         data = {} if id_empresa is None else {"id_empresa": id_empresa}
+        if nombre_hint:
+            data["nombre_hint"] = nombre_hint
         return self._post("/reconocer-liveness", files=files, data=data)
 
     def extraer(self, foto_bytes: bytes) -> dict | None:

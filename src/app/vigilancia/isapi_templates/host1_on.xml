@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Suscribe el terminal para EMPUJAR (push) sus eventos de acceso al webhook.
+     Reemplaza <WEBHOOK_IP> por la IP LAN FIJA de la máquina del webhook y <WEBHOOK_PORT> (9080).
+     PUT a http://<IP_TERMINAL>/ISAPI/Event/notification/httpHosts/1 -->
+<HttpHostNotification version="2.0" xmlns="http://www.isapi.org/ver20/XMLSchema">
+  <id>1</id>
+  <url>/</url>
+  <protocolType>HTTP</protocolType>
+  <parameterFormatType>JSON</parameterFormatType>
+  <addressingFormatType>ipaddress</addressingFormatType>
+  <ipAddress><WEBHOOK_IP></ipAddress>
+  <portNo><WEBHOOK_PORT></portNo>
+  <httpAuthenticationMethod>none</httpAuthenticationMethod>
+  <SubscribeEvent>
+    <heartbeat>30</heartbeat>
+    <eventMode>all</eventMode>
+    <EventList>
+      <Event>
+        <type>AccessControllerEvent</type>
+        <minorAlarm></minorAlarm>
+        <minorException></minorException>
+        <minorOperation></minorOperation>
+        <minorEvent></minorEvent>
+        <pictureURLType>binary</pictureURLType>
+      </Event>
+    </EventList>
+  </SubscribeEvent>
+</HttpHostNotification>

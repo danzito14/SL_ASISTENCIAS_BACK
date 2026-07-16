@@ -16,6 +16,9 @@
 CREATE EXTENSION IF NOT EXISTS vector;
 CREATE EXTENSION IF NOT EXISTS postgis;
 CREATE EXTENSION IF NOT EXISTS pg_cron;
+-- unaccent: para acotar el match por nombre sin importar acentos (Sánchez=Sanchez),
+-- usado por recognition.buscar_en_bd cuando recibe un nombre_hint.
+CREATE EXTENSION IF NOT EXISTS unaccent;
 
 
 -- ════════════════════════════════════════════════════════════════════════════
@@ -142,6 +145,20 @@ DO $$ BEGIN
     --   otra_empresa -> match con un trabajador de OTRA empresa
     IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'tipo_intento') THEN
         CREATE TYPE tipo_intento AS ENUM ('spoofing', 'desconocido', 'otra_empresa');
+    END IF;
+
+    -- ── vigilancia (cámaras/terminales de asistencia por reconocimiento) ─────
+    -- Propósito de la cámara (por función). Hoy se usa 'asistencia';
+    -- 'control_acceso'/'vigilancia' quedan para fases futuras.
+    IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'tipo_camara') THEN
+        CREATE TYPE tipo_camara AS ENUM ('asistencia', 'control_acceso', 'vigilancia');
+    END IF;
+    -- Desenlace de cada evento del motor de captura (bitácora eventos_camara).
+    IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'tipo_evento_camara') THEN
+        CREATE TYPE tipo_evento_camara AS ENUM (
+            'movimiento', 'rostro_detectado', 'baja_calidad', 'match', 'no_match',
+            'spoof', 'no_rostro', 'error', 'sin_conexion'
+        );
     END IF;
 END $$;
 
@@ -539,6 +556,65 @@ CREATE TABLE IF NOT EXISTS intentos_acceso (
 -- así que en una BD existente el ALTER es lo que realmente agrega la columna).
 ALTER TABLE intentos_acceso
     ADD COLUMN IF NOT EXISTS estado estado_incidencia NOT NULL DEFAULT 'pendiente';
+
+-- ── camaras (microservicio vigilancia) ───────────────────────────────────────
+-- Config de cada terminal/cámara IP de captura para asistencia por reconocimiento.
+-- Captura por snapshot ISAPI HTTP (ffmpeg/RTSP NO decodifica el "HIK Media Server").
+-- id_puerta define el punto de fichaje (empresa/tipo del escaneo); credencial CIFRADA.
+CREATE TABLE IF NOT EXISTS camaras (
+    id_camara            SERIAL PRIMARY KEY,
+    nombre               VARCHAR(100)   NOT NULL,
+    id_empresa           INT            NOT NULL REFERENCES empresas(id_empresa)
+                             ON UPDATE CASCADE ON DELETE CASCADE,
+    id_area              INT            REFERENCES area_trabajo(id_area) ON DELETE SET NULL,
+    id_puerta            INT            REFERENCES puertas_acceso(id_puerta) ON DELETE SET NULL,
+    id_dispositivo       INT            REFERENCES dispositivos(id_dispositivo) ON DELETE SET NULL,
+    marca                VARCHAR(20)    NOT NULL DEFAULT 'hikvision',   -- hikvision|dahua|generico
+    host                 VARCHAR(45)    NOT NULL,
+    puerto               INT            NOT NULL DEFAULT 80,            -- HTTP ISAPI (no 554/RTSP)
+    canal                INT            NOT NULL DEFAULT 101,           -- 101=cam1 main, 102 sub, 201 cam2...
+    ruta_snapshot        TEXT,                                         -- override del path ISAPI
+    usuario              VARCHAR(60),
+    credencial_cifrada   BYTEA,                                        -- password CIFRADA (Fernet), NUNCA texto plano
+    tipo_camara          tipo_camara    NOT NULL DEFAULT 'asistencia',
+    tipo_registro        tipo_registro  NOT NULL DEFAULT 'entrada',
+    habilitada           BOOLEAN        NOT NULL DEFAULT TRUE,
+    -- 'sondeo' (poll snapshot) o 'evento' (el terminal POSTea al webhook).
+    modo_captura         VARCHAR(10)    NOT NULL DEFAULT 'sondeo' CHECK (modo_captura IN ('sondeo','evento')),
+    gap_muestreo_seg     REAL           NOT NULL DEFAULT 0.7  CHECK (gap_muestreo_seg > 0),
+    umbral_movimiento    REAL           NOT NULL DEFAULT 2.5  CHECK (umbral_movimiento >= 0),
+    cooldown_seg         INT            NOT NULL DEFAULT 90   CHECK (cooldown_seg >= 0),
+    estado               estado_dispositivo NOT NULL DEFAULT 'activo',
+    ultima_conexion      TIMESTAMPTZ,
+    ultimo_frame_ts      TIMESTAMPTZ,
+    fecha_creacion       TIMESTAMPTZ    DEFAULT NOW(),
+    CONSTRAINT uq_camara_empresa_nombre     UNIQUE (id_empresa, nombre),
+    CONSTRAINT uq_camara_empresa_host_canal UNIQUE (id_empresa, host, canal)
+);
+
+-- ── eventos_camara (microservicio vigilancia) ────────────────────────────────
+-- Bitácora/evidencia. UUIDv7. id_escaneo/id_trabajador = enlaces SUAVES (sin FK):
+-- el escaneo lo crea el pipeline y puede vivir en otra BD a futuro.
+CREATE TABLE IF NOT EXISTS eventos_camara (
+    id_evento            UUID           PRIMARY KEY DEFAULT gen_uuid_v7(),
+    id_camara            INT            NOT NULL REFERENCES camaras(id_camara) ON DELETE CASCADE,
+    id_empresa           INT            REFERENCES empresas(id_empresa)
+                             ON UPDATE CASCADE ON DELETE CASCADE,
+    id_puerta            INT            REFERENCES puertas_acceso(id_puerta) ON DELETE SET NULL,
+    tipo_evento          tipo_evento_camara NOT NULL,
+    id_escaneo           UUID,          -- enlace SUAVE (sin FK)
+    id_trabajador        INT,           -- enlace SUAVE (sin FK)
+    confianza            REAL           CHECK (confianza BETWEEN 0 AND 1),
+    face_px              INT,
+    mensaje              TEXT,
+    ruta_frame           TEXT,
+    fecha_hora           TIMESTAMPTZ    NOT NULL DEFAULT NOW(),
+    creado_en_cliente    TIMESTAMPTZ,
+    sincronizado_en      TIMESTAMPTZ    DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_eventos_camara_cam_fecha ON eventos_camara (id_camara, fecha_hora DESC);
+CREATE INDEX IF NOT EXISTS idx_eventos_camara_emp_fecha ON eventos_camara (id_empresa, fecha_hora DESC);
+CREATE INDEX IF NOT EXISTS idx_eventos_camara_tipo      ON eventos_camara (tipo_evento);
 
 -- ── historial_auditoria ──────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS historial_auditoria (
@@ -1335,7 +1411,11 @@ INSERT INTO roles (nombre_rol, descripcion, permisos, estado) VALUES
     ('reportes',      'Tableros/exportes: reportes, asistencias, incidencias, intentos, escaneos, trabajadores.',
         '{"scopes": ["reportes:read", "asistencias:read", "incidencias:read", "intentos:read", "escaneos:read", "trabajadores:read"]}'::jsonb, 'activo'),
     ('dashboard',     'Solo el panel de inicio (métricas del día). NO descarga reportes.',
-        '{"scopes": ["dashboard:read"]}'::jsonb, 'activo')
+        '{"scopes": ["dashboard:read"]}'::jsonb, 'activo'),
+    ('vigilancia',    'Gestión de cámaras/terminales de asistencia por reconocimiento facial + consulta de eventos.',
+        '{"scopes": ["vigilancia:read", "vigilancia:write"]}'::jsonb, 'activo'),
+    ('vigilancia_edge', 'Cuenta de servicio del motor de captura: manda frames al scanner del back (scanner:use).',
+        '{"scopes": ["scanner:use"]}'::jsonb, 'activo')
 ON CONFLICT (nombre_rol) DO NOTHING;
 
 

@@ -1,0 +1,95 @@
+# Mini-stack LOCAL del kiosko de escritorio (corre en la PC del kiosko, NO en la nube).
+# Fase 1: postgres local (roster) + kiosk_local (baja el roster de la nube).
+# Fase 2: se suma 'recognition' (mismo código de prod) para reconocer offline.
+# Arranque:  docker compose -f docker-compose.local.yml -p kiosk up -d --build
+name: kiosk
+
+services:
+  # Postgres+pgvector LOCAL — mismo esquema que prod (init.sql). Guarda el roster de
+  # UNA empresa + la cola de escaneos. Solo escucha en localhost.
+  kiosk_postgres:
+    image: pgvector-postgis:pg17            # imagen ya construida por el stack principal
+    container_name: kiosk_postgres
+    command:
+      - "postgres"
+      - "-c"
+      - "shared_preload_libraries=pg_cron"   # init.sql crea la extensión pg_cron
+      - "-c"
+      - "cron.database_name=SL_ASISTENCIAS"
+      - "-c"
+      - "cron.timezone=America/Mazatlan"
+      - "-c"
+      - "TimeZone=America/Mazatlan"
+    environment:
+      POSTGRES_USER: root
+      POSTGRES_PASSWORD: ${KIOSK_DB_PASSWORD:-CAMBIAR_kiosk}
+      POSTGRES_DB: SL_ASISTENCIAS
+    volumes:
+      - kiosk_pgdata:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/01_init.sql:ro
+      - ./roles_microservicio.sql:/docker-entrypoint-initdb.d/02_roles.sql:ro
+    ports:
+      - "127.0.0.1:5533:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U root -d SL_ASISTENCIAS"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # Backend local: baja el roster de la nube → BD local. Escucha en localhost:8100.
+  kiosk_local:
+    build: ../app/kiosk_local
+    image: sl-kiosk-local:latest
+    container_name: kiosk_local
+    environment:
+      DB_HOST: kiosk_postgres
+      DB_PORT: "5432"
+      DB_USER: root
+      DB_PASSWORD: ${KIOSK_DB_PASSWORD:-CAMBIAR_kiosk}
+      DB_NAME: SL_ASISTENCIAS
+      DEBUG: ${KIOSK_DEBUG:-false}
+      # Nube: por defecto el gateway del stack dev de ESTA máquina (host.docker.internal).
+      # En prod real = https://sl-asistencias.slagricola.cloud/api
+      CLOUD_BASE_URL: ${KIOSK_CLOUD_URL:-http://host.docker.internal:8005}
+      KIOSK_USER: ${KIOSK_USER:-kiosko_test}
+      KIOSK_PASSWORD: ${KIOSK_PASSWORD:-Kiosko-SL-2026}
+      KIOSK_TIPO: ${KIOSK_TIPO:-oficina}
+      KIOSK_EMPRESA: ${KIOSK_EMPRESA:-1}
+      KIOSK_TZ: ${KIOSK_TZ:-America/Mazatlan}
+      # Reconocimiento LOCAL (contenedor recognition de abajo, apuntando a la BD local).
+      RECOGNITION_URL: http://recognition:8000
+      RECOGNITION_INTERNAL_TOKEN: ${RECOGNITION_INTERNAL_TOKEN:-kiosk-local-token}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "127.0.0.1:8100:8000"
+    depends_on:
+      kiosk_postgres:
+        condition: service_healthy
+
+  # FASE 2: reconocimiento LOCAL — MISMA imagen/código de prod, apuntando a la BD local.
+  # Garantiza paridad total (es el mismo motor buffalo_l + pgvector). Reusa sl-recognition:latest
+  # (ya construida por el stack principal). Conecta como root (superuser local) = SELECT libre.
+  recognition:
+    image: sl-recognition:latest
+    container_name: kiosk_recognition
+    environment:
+      DB_HOST: kiosk_postgres
+      DB_PORT: "5432"
+      DB_USER: root
+      DB_PASSWORD: ${KIOSK_DB_PASSWORD:-CAMBIAR_kiosk}
+      DB_NAME: SL_ASISTENCIAS
+      RECOGNITION_INTERNAL_TOKEN: ${RECOGNITION_INTERNAL_TOKEN:-kiosk-local-token}
+      PRELOAD_FACE_MODEL: "true"
+      # Liveness / anti-spoof (webcam = riesgo de foto/pantalla). Modelo MiniFASNet ya
+      # horneado. OJO: está afinado a la distancia del terminal; en un selfie de webcam
+      # muy de cerca da FALSO spoof (recorte de contexto 2.7× se sale). DEFAULT OFF hasta
+      # validarlo/afinarlo con capturas reales a distancia de kiosko (KIOSK_ANTISPOOF=true).
+      ANTISPOOFING_ACTIVO: ${KIOSK_ANTISPOOF:-false}
+      ANTISPOOF_UMBRAL: ${KIOSK_ANTISPOOF_UMBRAL:-0.5}
+    depends_on:
+      kiosk_postgres:
+        condition: service_healthy
+
+volumes:
+  kiosk_pgdata:

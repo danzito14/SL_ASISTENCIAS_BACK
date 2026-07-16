@@ -64,7 +64,8 @@ app = FastAPI(title=settings.APP_TITLE, version=settings.APP_VERSION, debug=sett
 
 # ── 1. Reconocer (1 imagen): pipeline completo, sin registrar ─────────────────
 @app.post("/reconocer", dependencies=[Depends(exigir_token_interno)], summary="Reconocer (1 imagen)")
-def reconocer(foto: UploadFile = File(...), id_empresa: int | None = Form(None), db: Session = Depends(get_db)):
+def reconocer(foto: UploadFile = File(...), id_empresa: int | None = Form(None),
+              nombre_hint: str | None = Form(None), db: Session = Depends(get_db)):
     frame = _frame_de(foto)
     with _SEM:
         cara = motor.detectar_y_extraer(frame)
@@ -73,7 +74,7 @@ def reconocer(foto: UploadFile = File(...), id_empresa: int | None = Form(None),
         anti = motor.evaluar_antispoof(frame, cara)
         if anti is not None and not anti["es_real"]:
             return {"estado": "spoof", "score_real": anti["score_real"], "recorte_b64": _b64(motor.recorte_jpeg(frame, cara))}
-        match = motor.buscar_en_bd(cara["embedding"], db, id_empresa=id_empresa)
+        match = motor.buscar_en_bd(cara["embedding"], db, id_empresa=id_empresa, nombre_hint=nombre_hint)
         recorte = _b64(motor.recorte_jpeg(frame, cara))
         if match is None:
             return {"estado": "no_match", "det_score": cara["det_score"],
@@ -84,7 +85,8 @@ def reconocer(foto: UploadFile = File(...), id_empresa: int | None = Form(None),
 
 # ── 2. Reconocer con liveness (N imágenes) ────────────────────────────────────
 @app.post("/reconocer-liveness", dependencies=[Depends(exigir_token_interno)], summary="Reconocer con liveness (N imágenes)")
-def reconocer_liveness(fotos: list[UploadFile] = File(...), id_empresa: int | None = Form(None), db: Session = Depends(get_db)):
+def reconocer_liveness(fotos: list[UploadFile] = File(...), id_empresa: int | None = Form(None),
+                       nombre_hint: str | None = Form(None), db: Session = Depends(get_db)):
     frames = [f for f in (motor.leer_imagen(x.file.read()) for x in fotos) if f is not None]
     with _SEM:
         pares = [(f, motor.detectar_y_extraer(f)) for f in frames]
@@ -99,7 +101,7 @@ def reconocer_liveness(fotos: list[UploadFile] = File(...), id_empresa: int | No
         anti = motor.evaluar_antispoof(mejor_frame, mejor)
         if anti is not None and not anti["es_real"]:
             return {"estado": "spoof", "score_real": anti["score_real"], "recorte_b64": _b64(motor.recorte_jpeg(mejor_frame, mejor))}
-        match = motor.buscar_en_bd(mejor["embedding"], db, id_empresa=id_empresa)
+        match = motor.buscar_en_bd(mejor["embedding"], db, id_empresa=id_empresa, nombre_hint=nombre_hint)
         recorte = _b64(motor.recorte_jpeg(mejor_frame, mejor))
         if match is None:
             return {"estado": "no_match", "det_score": mejor["det_score"],
@@ -114,7 +116,7 @@ def reconocer_liveness(fotos: list[UploadFile] = File(...), id_empresa: int | No
 def extraer(foto: UploadFile = File(...)):
     frame = _frame_de(foto)
     with _SEM:
-        cara = motor.detectar_y_extraer(frame)
+        cara = motor.detectar_y_extraer(frame, con_pose=True)
         if cara is None:
             return {"estado": "no_rostro"}
         anti = motor.evaluar_antispoof(frame, cara)
@@ -127,13 +129,14 @@ def extraer(foto: UploadFile = File(...)):
 
 # ── 4. Identificar (1 imagen): solo match, sin registrar ──────────────────────
 @app.post("/identificar", dependencies=[Depends(exigir_token_interno)], summary="Identificar (match, sin registrar)")
-def identificar(foto: UploadFile = File(...), id_empresa: int | None = Form(None), db: Session = Depends(get_db)):
+def identificar(foto: UploadFile = File(...), id_empresa: int | None = Form(None),
+                nombre_hint: str | None = Form(None), db: Session = Depends(get_db)):
     frame = _frame_de(foto)
     with _SEM:
         cara = motor.detectar_y_extraer(frame)
         if cara is None:
             return {"reconocido": False, "estado": "no_rostro"}
-        match = motor.buscar_en_bd(cara["embedding"], db, id_empresa=id_empresa)
+        match = motor.buscar_en_bd(cara["embedding"], db, id_empresa=id_empresa, nombre_hint=nombre_hint)
         if match is None:
             return {"reconocido": False, "det_score": cara["det_score"]}
         return {"reconocido": True, "trabajador": match, "similitud": match["similitud"], "det_score": cara["det_score"]}

@@ -54,7 +54,9 @@ services:
       # el nginx termina TLS y hace reverse-proxy de sl-asistencias.slagricola.cloud
       # a este puerto. Es el MISMO 8005 que ya usaba el monolito v1, así NO se toca
       # el vhost de nginx (solo se apaga v1 antes). Solo 127.0.0.1 (no a internet).
-      - "127.0.0.1:8005:80"
+      # Puerto CONFIGURABLE: prod usa 8005 (default, lo espera el nginx); en DEV se
+      # pone GATEWAY_HOST_PORT=8000 en el .env (que es a donde pega el front local).
+      - "127.0.0.1:${GATEWAY_HOST_PORT:-8005}:80"
       - "127.0.0.1:8080:8080"   # dashboard, SOLO localhost
     volumes:
       - ./traefik/traefik.yml:/etc/traefik/traefik.yml:ro
@@ -156,7 +158,7 @@ services:
       CORS_ORIGINS: ${CORS_ORIGINS}
       # JWT
       JWT_EXPIRE_MINUTES: "480"
-      ROLES_TOKEN_SIN_EXPIRACION: "kiosko,escaneador" # roles del APK/scanner: token sin expiración (operan offline)
+      ROLES_TOKEN_SIN_EXPIRACION: "kiosko,escaneador,vigilancia_edge" # roles del APK/scanner: token sin expiración (operan offline)
       # Empresa "comodín" del super-admin (ve TODAS las empresas)
       EMPRESA_ADMIN: "99"
       # Token que prueba que el request pasó por Traefik (anti-bypass del gateway).
@@ -211,7 +213,7 @@ services:
       JWT_SECRET: ${JWT_SECRET}  # ÚNICO servicio que lo necesita (emite y valida el JWT)
       JWT_EXPIRE_MINUTES: "480"
       # roles del APK/scanner (kiosko, escaneador): token sin expiración (operan offline).
-      ROLES_TOKEN_SIN_EXPIRACION: "kiosko,escaneador"
+      ROLES_TOKEN_SIN_EXPIRACION: "kiosko,escaneador,vigilancia_edge"
       EMPRESA_ADMIN: "99"
     labels:
       - "traefik.enable=true"
@@ -467,6 +469,84 @@ services:
       - "traefik.http.routers.offsync.entrypoints=web"
       - "traefik.http.routers.offsync.middlewares=api-strip@file,jwt-auth@file,gateway-token@docker,rate-limit@file,secure-headers@file"
       - "traefik.http.services.offsync.loadbalancer.server.port=8000"
+
+  # ── Microservicio vigilancia (asistencia por reconocimiento desde cámaras/terminales) ──
+  # Captura por snapshot ISAPI de terminales faciales IP y manda los frames al scanner
+  # del back (/scanner/acceso/foto|liveness) como cuenta de servicio 'vigilancia_edge'
+  # (scanner:use); el back reusa recognition + anti-spoof + registra la asistencia.
+  # Conecta como svc_vigilancia (mínimo privilegio). DOS procesos de la MISMA imagen:
+  #   · vigilancia_api      → CRUD de cámaras (gunicorn), expuesto por el gateway.
+  #   · vigilancia_capture  → motor de captura (proceso único con advisory lock), interno.
+  vigilancia_api:
+    build:
+      context: ../app/vigilancia
+      dockerfile: Dockerfile
+    image: sl-vigilancia:latest
+    container_name: sl_vigilancia_api
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_USER: svc_vigilancia
+      DB_PASSWORD: ${SVC_VIGILANCIA_PASSWORD:-CAMBIAR_vigilancia}
+      DB_NAME: ${POSTGRES_DB:-SL_ASISTENCIAS}
+      APP_TITLE: "Vigilancia Service"
+      APP_VERSION: "1.0.0"
+      DEBUG: "false"
+      CORS_ORIGINS: ${CORS_ORIGINS}
+      EMPRESA_ADMIN: "99"
+      GATEWAY_INTERNAL_TOKEN: ${GATEWAY_INTERNAL_TOKEN:-CAMBIAR_gateway_token}
+      # Cifrado de credenciales de cámara (Fernet). MISMA llave que vigilancia_capture.
+      VIGILANCIA_SECRET_KEY: ${VIGILANCIA_SECRET_KEY}
+    labels:
+      # Expuesto por el gateway bajo /vigilancia (y /api/vigilancia que recorta api-strip).
+      # El JWT lo valida Traefik (jwt-auth → identity); luego autoriza por scope
+      # (vigilancia:read/write). Prefijo único (no choca con off_sync/emp_sync).
+      - "traefik.enable=true"
+      - "traefik.http.routers.vigilancia.rule=PathPrefix(`/vigilancia`) || PathPrefix(`/api/vigilancia`)"
+      - "traefik.http.routers.vigilancia.entrypoints=web"
+      - "traefik.http.routers.vigilancia.middlewares=api-strip@file,jwt-auth@file,gateway-token@docker,rate-limit@file,secure-headers@file"
+      - "traefik.http.services.vigilancia.loadbalancer.server.port=8000"
+
+  # Motor de captura: proceso ÚNICO (pg_try_advisory_lock) que sondea las cámaras y
+  # manda los frames al scanner. Misma imagen, comando distinto. SIN labels (interno).
+  # NO replicar este servicio (el lock garantiza un supervisor único; mantener en 1).
+  vigilancia_capture:
+    image: sl-vigilancia:latest
+    container_name: sl_vigilancia_capture
+    restart: unless-stopped
+    command: ["python", "-m", "src.capture.run"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      vigilancia_api:
+        condition: service_started   # asegura que la imagen ya se construyó
+    environment:
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_USER: svc_vigilancia
+      DB_PASSWORD: ${SVC_VIGILANCIA_PASSWORD:-CAMBIAR_vigilancia}
+      DB_NAME: ${POSTGRES_DB:-SL_ASISTENCIAS}
+      DEBUG: ${VIGILANCIA_DEBUG:-false}
+      VIGILANCIA_SECRET_KEY: ${VIGILANCIA_SECRET_KEY}
+      # Scanner del back por el gateway INTERNO (Traefik) + cuenta de servicio vigilancia_edge.
+      SCANNER_BASE_URL: http://traefik
+      VIGILANCIA_SERVICE_USER: ${VIGILANCIA_SERVICE_USER:-vigilancia_edge}
+      VIGILANCIA_SERVICE_PASSWORD: ${VIGILANCIA_SERVICE_PASSWORD}
+      SCANNER_USAR_LIVENESS: ${SCANNER_USAR_LIVENESS:-true}
+      CAP_FRAMES_LIVENESS: ${CAP_FRAMES_LIVENESS:-3}
+      # Captura por EVENTO (webhook): el terminal (Hikvision httpHosts) POSTea aquí.
+      WEBHOOK_PORT: ${WEBHOOK_PORT:-9080}
+      WEBHOOK_TRIGGER_SUBTYPES: ${WEBHOOK_TRIGGER_SUBTYPES:-38}  # subEventType de "cara" (tuneable)
+      WEBHOOK_COOLDOWN_SEG: ${WEBHOOK_COOLDOWN_SEG:-8}
+      WEBHOOK_TOKEN: ${WEBHOOK_TOKEN:-}
+    # El webhook DEBE ser alcanzable por el terminal en la LAN (por eso 0.0.0.0). Solo
+    # lo usa el nodo edge que corre la captura.
+    ports:
+      - "0.0.0.0:${WEBHOOK_PORT:-9080}:${WEBHOOK_PORT:-9080}"
 
   # ── Microservicio reports (reportes, SOLO LECTURA + export XLSX/CSV) ────────
   # Conecta como svc_reports (SELECT a todo; idealmente una réplica de lectura).

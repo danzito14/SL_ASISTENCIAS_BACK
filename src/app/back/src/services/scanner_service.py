@@ -285,10 +285,11 @@ class ScannerService:
 
     # ── Pipelines de acceso ─────────────────────────────────────────────────────
     def procesar_foto_acceso(self, foto_bytes: bytes, id_puerta: int, tipo_registro: str,
-                             id_dispositivo: int | None, db: Session, latitud=None, longitud=None) -> ScanResponse:
+                             id_dispositivo: int | None, db: Session, latitud=None, longitud=None,
+                             nombre_hint: str | None = None) -> ScanResponse:
         self._validar_destino(id_puerta, id_dispositivo, db)
         id_empresa = tenancy_service.empresa_de_puerta(id_puerta, db)
-        res = recognition_service.reconocer(foto_bytes, id_empresa)
+        res = recognition_service.reconocer(foto_bytes, id_empresa, nombre_hint=nombre_hint)
         if res is None:
             return _rechazo("Servicio de reconocimiento no disponible.")
 
@@ -317,10 +318,11 @@ class ScannerService:
                                       observaciones=f"Reconocimiento facial. Similitud: {sim:.4f}")
 
     def procesar_fotos_acceso(self, fotos_bytes: list[bytes], id_puerta: int, tipo_registro: str,
-                              id_dispositivo: int | None, db: Session, latitud=None, longitud=None) -> ScanResponse:
+                              id_dispositivo: int | None, db: Session, latitud=None, longitud=None,
+                              nombre_hint: str | None = None) -> ScanResponse:
         self._validar_destino(id_puerta, id_dispositivo, db)
         id_empresa = tenancy_service.empresa_de_puerta(id_puerta, db)
-        res = recognition_service.reconocer_liveness(fotos_bytes, id_empresa)
+        res = recognition_service.reconocer_liveness(fotos_bytes, id_empresa, nombre_hint=nombre_hint)
         if res is None:
             return _rechazo("Servicio de reconocimiento no disponible.")
 

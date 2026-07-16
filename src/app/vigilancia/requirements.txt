@@ -1,0 +1,22 @@
+# vigilancia — API de gestión de cámaras/terminales + (Fase 4) motor de captura.
+# Imagen LIGERA: sin ffmpeg/IA. La captura es por snapshot ISAPI HTTP (no RTSP) y
+# el reconocimiento lo hace el servicio recognition por HTTP; aquí no corre InsightFace.
+fastapi==0.115.0
+uvicorn==0.30.6
+gunicorn==23.0.0
+python-multipart==0.0.12   # endpoints multipart (recorte de rostro → /reid/identificar)
+SQLAlchemy==2.0.50
+psycopg2-binary==2.9.10
+pydantic==2.9.2
+pydantic-settings==2.5.2
+python-dotenv==1.0.1
+cryptography==43.0.1
+# Fase 4 (motor de captura): httpx (llamar al scanner del back), Pillow + numpy
+# (gate de movimiento por diff de frames). El API no los usa, pero van en la MISMA
+# imagen porque el proceso de captura corre con el mismo Dockerfile.
+httpx==0.27.2
+Pillow==10.4.0
+numpy==2.1.1
+# Descubrimiento de canales de DVR (config): frame RTSP de cada canal para preview en el
+# front. cv2 headless (trae su propio ffmpeg) → sin GUI. Solo lo usa ese endpoint.
+opencv-python-headless==4.10.0.84

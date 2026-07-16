@@ -38,7 +38,8 @@ SVC_RECOGNITION_PASSWORD:svc_recognition
 SVC_TENANCY_PASSWORD:svc_tenancy
 SVC_WORKERS_PASSWORD:svc_workers
 SVC_REPORTS_PASSWORD:svc_reports
-SVC_OFFLINE_PASSWORD:svc_offline"
+SVC_OFFLINE_PASSWORD:svc_offline
+SVC_VIGILANCIA_PASSWORD:svc_vigilancia"
 
 echo "==> 1/6  Pre-flight: ¿quedan placeholders CAMBIAR_* en $ENV_FILE?"
 if grep -qE "=CAMBIAR_" "$ENV_FILE"; then
@@ -87,7 +88,7 @@ $DC exec -T postgres sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERR
 echo "    roles alineados"
 
 echo "==> 6/6  Reiniciar servicios para que reconecten con las claves nuevas"
-$DC restart identity recognition tenancy workers reports employee_monitoring offline_sync backend
+$DC restart identity recognition tenancy workers reports employee_monitoring offline_sync vigilancia_api vigilancia_capture backend
 
 echo "==> Verificación: que ningún contenedor quede en 'Restarting'"
 for _ in $(seq 1 10); do

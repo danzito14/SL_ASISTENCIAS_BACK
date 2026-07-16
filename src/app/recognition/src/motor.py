@@ -7,7 +7,9 @@ busca el match en la BD (SOLO LECTURA de embeddings/trabajadores como svc_recogn
 NO registra escaneos ni conoce la lógica de acceso — eso es del backend.
 """
 import logging
+import re
 import threading
+import unicodedata
 
 import cv2
 import numpy as np
@@ -21,6 +23,10 @@ from src.antispoof import antispoof_service
 logger = logging.getLogger(__name__)
 
 SIMILITUD_UMBRAL = 0.5
+# Umbral MÁS PERMISIVO cuando la búsqueda ya está acotada por nombre a pocos
+# candidatos: al no haber con quién confundirse, se pueden atrapar matches borderline
+# (típico entre la cámara del terminal y la foto de SYS21, fuentes distintas). Tuneable.
+SIMILITUD_UMBRAL_ACOTADO = 0.40
 SPOOFING_UMBRAL = 0.5
 LIVENESS_MIN_FRAMES_CON_ROSTRO = 2
 LIVENESS_MISMA_PERSONA_UMBRAL = 0.45
@@ -30,23 +36,61 @@ LIVENESS_MOVIMIENTO_MIN = 0.004
 # reutilizar (p. ej. enrolar a un 'desconocido' desde esa misma foto).
 RECORTE_MARGEN = 0.5
 
+# Palabras a IGNORAR del nombre que manda un terminal externo (roles/áreas/ruido,
+# no identidad). El nombre sirve solo como PISTA para acotar el universo de match.
+_ROLES_NOMBRE = {
+    "logistica", "logis", "slp", "compras", "nominas", "conta", "contabilidad",
+    "sistemas", "sis", "rh", "rrhh", "admin", "administracion", "planta", "oficina",
+    "de", "del", "la", "las", "los", "y", "el",
+}
+
+
+def _tokens_nombre(nombre: str | None) -> list[str]:
+    """Normaliza el nombre (sin acentos, minúsculas, solo letras), quita roles y
+    palabras cortas. Devuelve los tokens 'reales' para acotar la búsqueda por nombre."""
+    if not nombre:
+        return []
+    s = unicodedata.normalize("NFKD", nombre).encode("ascii", "ignore").decode("ascii").lower()
+    return [t for t in re.findall(r"[a-z]+", s) if len(t) >= 3 and t not in _ROLES_NOMBRE]
+
 
 class Motor:
 
     def __init__(self):
+        # buffalo_l trae 5 sub-modelos y, sin acotar, los corre TODOS en cada cara:
+        # det_10g (detección), w600k_r50 (embedding), 2d106det (landmarks 2D),
+        # 1k3d68 (landmarks 3D → pose) y genderage. El camino caliente (/reconocer,
+        # /identificar, liveness) solo necesita detección + embedding → app LIGERA.
+        # 2d106det y genderage no se usan en ningún lado; la pose (1k3d68) solo la
+        # consume /extraer (calidad de enrolamiento), que usa la app CON POSE,
+        # cargada aparte y perezosamente para no pesar en el camino caliente.
         self._app: FaceAnalysis | None = None
+        self._app_pose: FaceAnalysis | None = None
         self._lock = threading.Lock()
+
+    def _construir_app(self, modulos: list[str]) -> FaceAnalysis:
+        app = FaceAnalysis(name="buffalo_l", providers=["CPUExecutionProvider"],
+                           allowed_modules=modulos)
+        app.prepare(ctx_id=0, det_size=(640, 640))
+        return app
 
     def _get_app(self) -> FaceAnalysis:
         if self._app is None:
             with self._lock:
                 if self._app is None:
-                    logger.info("Cargando modelo InsightFace buffalo_l...")
-                    app = FaceAnalysis(name="buffalo_l", providers=["CPUExecutionProvider"])
-                    app.prepare(ctx_id=0, det_size=(640, 640))
-                    self._app = app
-                    logger.info("Modelo InsightFace listo.")
+                    logger.info("Cargando InsightFace buffalo_l (detección+embedding)...")
+                    self._app = self._construir_app(["detection", "recognition"])
+                    logger.info("Modelo InsightFace (ligero) listo.")
         return self._app
+
+    def _get_app_pose(self) -> FaceAnalysis:
+        if self._app_pose is None:
+            with self._lock:
+                if self._app_pose is None:
+                    logger.info("Cargando InsightFace buffalo_l (+pose, solo enrolamiento)...")
+                    self._app_pose = self._construir_app(["detection", "recognition", "landmark_3d_68"])
+                    logger.info("Modelo InsightFace (con pose) listo.")
+        return self._app_pose
 
     def precargar(self) -> None:
         self._get_app()
@@ -57,8 +101,10 @@ class Motor:
         arr = np.frombuffer(contenido, dtype=np.uint8)
         return cv2.imdecode(arr, cv2.IMREAD_COLOR)
 
-    def detectar_y_extraer(self, frame: np.ndarray) -> dict | None:
-        app = self._get_app()
+    def detectar_y_extraer(self, frame: np.ndarray, con_pose: bool = False) -> dict | None:
+        # con_pose=True (solo /extraer) usa la app con landmark_3d_68 para poblar
+        # `pose`; en el camino caliente la app ligera no la calcula (pose → None).
+        app = self._get_app_pose() if con_pose else self._get_app()
         faces = app.get(frame)
         if not faces:
             return None
@@ -111,25 +157,36 @@ class Motor:
         gris = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
         return float(cv2.Laplacian(gris, cv2.CV_64F).var())
 
-    def buscar_en_bd(self, embedding: list[float], db: Session,
-                     id_empresa: int | None = None, id_area: int | None = None) -> dict | None:
-        """Match coseno con pgvector. Devuelve datos de fila (sin ORM) o None."""
+    def _match_pgvector(self, embedding: list[float], db: Session, id_empresa, id_area,
+                        tokens: list[str], umbral: float = SIMILITUD_UMBRAL) -> dict | None:
+        """Una consulta pgvector (coseno) acotada por empresa/área y, si hay `tokens` de
+        nombre, SOLO entre quienes matcheen TODOS (palabra completa, sin acentos)."""
         vector_str = "[" + ",".join(str(x) for x in embedding) + "]"
+        params: dict = {"vector": vector_str, "id_empresa": id_empresa, "id_area": id_area}
+        cond_nombre = ""
+        if tokens:
+            partes = []
+            for i, tok in enumerate(tokens):
+                partes.append(
+                    f"unaccent(lower(t.nombre || ' ' || t.apellido)) ~ ('\\y' || :tok{i} || '\\y')"
+                )
+                params[f"tok{i}"] = tok
+            cond_nombre = " AND " + " AND ".join(partes)
         row = db.execute(
-            text("""
+            text(f"""
                 SELECT t.id_trabajador, t.nombre, t.apellido, t.id_empresa,
                        1 - (e.vector_embedding <=> CAST(:vector AS vector)) AS similitud
                 FROM embeddings e
                 JOIN trabajadores t ON t.id_trabajador = e.id_trabajador
                 WHERE e.estado = 'activo' AND t.estado = 'activo'
                   AND (:id_empresa IS NULL OR t.id_empresa = :id_empresa)
-                  AND (:id_area    IS NULL OR t.id_area    = :id_area)
+                  AND (:id_area    IS NULL OR t.id_area    = :id_area){cond_nombre}
                 ORDER BY e.vector_embedding <=> CAST(:vector AS vector)
                 LIMIT 1
             """),
-            {"vector": vector_str, "id_empresa": id_empresa, "id_area": id_area},
+            params,
         ).fetchone()
-        if row is None or float(row.similitud) < SIMILITUD_UMBRAL:
+        if row is None or float(row.similitud) < umbral:
             return None
         return {
             "id_trabajador": row.id_trabajador,
@@ -138,6 +195,23 @@ class Motor:
             "id_empresa": row.id_empresa,
             "similitud": float(row.similitud),
         }
+
+    def buscar_en_bd(self, embedding: list[float], db: Session,
+                     id_empresa: int | None = None, id_area: int | None = None,
+                     nombre_hint: str | None = None) -> dict | None:
+        """Match coseno con pgvector, acotado por empresa/área. Si viene `nombre_hint`
+        (p. ej. el nombre que reconoció un terminal externo), primero busca SOLO entre
+        quienes matcheen ese nombre — reduce el universo y baja falsos positivos. Si ahí
+        no hay match (nombre ambiguo/erróneo/no enrolado), CAE a la búsqueda completa."""
+        tokens = _tokens_nombre(nombre_hint)
+        if tokens:
+            # Acotado por nombre → umbral más permisivo (pocos candidatos, sin confusión).
+            m = self._match_pgvector(embedding, db, id_empresa, id_area, tokens,
+                                     SIMILITUD_UMBRAL_ACOTADO)
+            if m is not None:
+                return m
+        # Búsqueda completa (sin hint o fallback) → umbral estándar.
+        return self._match_pgvector(embedding, db, id_empresa, id_area, None)
 
     def mejor_candidato_global(self, embedding: list[float], db: Session) -> dict | None:
         """Rostro más parecido en TODA la BD, sin umbral (para clasificar no-match)."""

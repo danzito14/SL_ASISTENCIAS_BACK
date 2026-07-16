@@ -57,6 +57,9 @@ BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'svc_offline') THEN
         CREATE ROLE svc_offline     LOGIN PASSWORD 'CAMBIAR_offline'     CONNECTION LIMIT 15;
     END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'svc_vigilancia') THEN
+        CREATE ROLE svc_vigilancia  LOGIN PASSWORD 'CAMBIAR_vigilancia'  CONNECTION LIMIT 15;
+    END IF;
     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'app_cron') THEN
         CREATE ROLE app_cron        LOGIN PASSWORD 'CAMBIAR_cron'        CONNECTION LIMIT 5;
     END IF;
@@ -65,7 +68,7 @@ END $$;
 -- USAGE del esquema para todos los roles de servicio.
 GRANT USAGE ON SCHEMA public TO
     svc_identity, svc_tenancy, svc_workers, svc_recognition,
-    svc_access, svc_reports, svc_offline, app_cron;
+    svc_access, svc_reports, svc_offline, svc_vigilancia, app_cron;
 
 
 -- ════════════════════════════════════════════════════════════════════════════
@@ -164,6 +167,24 @@ GRANT EXECUTE ON FUNCTION
     TO svc_offline;
 -- Por si una fila llega sin UUID (normalmente lo genera el dispositivo).
 GRANT EXECUTE ON FUNCTION gen_uuid_v7() TO svc_offline;
+
+
+-- ════════════════════════════════════════════════════════════════════════════
+-- 4c) VIGILANCIA  — cámaras/terminales de asistencia por reconocimiento facial
+-- ────────────────────────────────────────────────────────────────────────────
+-- Dueño de camaras/eventos_camara. Es DELGADO: NO corre IA ni registra asistencia;
+-- manda los frames al scanner del back (POST /scanner/acceso/foto|liveness), que reusa
+-- recognition + anti-spoof + escribe escaneos + consolida (como svc_access). Por eso
+-- solo necesita SUS 2 tablas + lectura de tenancy. Alcance ACTUAL = solo asistencia.
+-- ════════════════════════════════════════════════════════════════════════════
+GRANT SELECT, INSERT, UPDATE, DELETE ON camaras, eventos_camara TO svc_vigilancia;
+GRANT USAGE, SELECT ON SEQUENCE camaras_id_camara_seq TO svc_vigilancia;
+-- Cruzados de solo lectura (resolver cámara→puerta/área/empresa/dispositivo + nombre del match):
+GRANT SELECT ON empresas, area_trabajo, puertas_acceso, dispositivos, trabajadores
+    TO svc_vigilancia;
+-- Solo gen_uuid_v7 para el PK UUIDv7 de eventos_camara (no toca escaneos/asistencia:
+-- eso lo hace el scanner del back como svc_access).
+GRANT EXECUTE ON FUNCTION gen_uuid_v7() TO svc_vigilancia;
 
 
 -- ════════════════════════════════════════════════════════════════════════════
