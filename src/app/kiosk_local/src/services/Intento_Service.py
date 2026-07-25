@@ -3,6 +3,7 @@
 # cola para subir a la nube. sincronizado_en = NULL marca "pendiente"; el loop de subida
 # los manda a POST /off_sync/intentos. id_intento es UUIDv7 (gen_uuid_v7, default de la
 # tabla) → generado en la ESTACIÓN, idempotente al re-subir (la nube hace ON CONFLICT).
+import base64
 import logging
 
 from sqlalchemy import text
@@ -26,9 +27,9 @@ _TIPO_POR_ESTADO = {
 
 _INSERT = text("""
     INSERT INTO intentos_acceso (id_puerta, id_empresa, tipo, id_trabajador, similitud,
-                                 id_dispositivo_origen, creado_en_cliente, sincronizado_en)
+                                 id_dispositivo_origen, creado_en_cliente, sincronizado_en, foto_bytes)
     VALUES (:puerta, :empresa, CAST(:tipo AS tipo_intento), NULL, :sim,
-            :disp, NOW(), NULL)
+            :disp, NOW(), NULL, :foto)
     RETURNING id_intento
 """)
 _PUERTA_DEFAULT = text(
@@ -44,9 +45,12 @@ class IntentoService:
         return p
 
     def registrar_fallido(self, db: Session, estado: str, id_empresa: int | None,
-                          id_puerta: int | None = None, similitud: float | None = None) -> str | None:
-        """Encola un intento fallido local. Devuelve id_intento, o None si el estado no
-        es registrable (p.ej. baja_calidad) o no hay puerta en el roster local."""
+                          id_puerta: int | None = None, similitud: float | None = None,
+                          recorte_b64: str | None = None) -> str | None:
+        """Encola un intento fallido local (con su foto de evidencia si viene). Devuelve
+        id_intento, o None si el estado no es registrable (p.ej. baja_calidad) o no hay
+        puerta en el roster local. La foto (recorte JPEG de recognition) se guarda en
+        foto_bytes y el loop la sube a media; luego se limpia."""
         tipo = _TIPO_POR_ESTADO.get(estado)
         if tipo is None:
             return None
@@ -56,12 +60,19 @@ class IntentoService:
             return None
         empresa = id_empresa if id_empresa is not None else settings.KIOSK_EMPRESA
         sim = None if similitud is None else min(max(float(similitud), 0.0), 1.0)
+        foto = None
+        if recorte_b64:
+            try:
+                foto = base64.b64decode(recorte_b64)
+            except (ValueError, TypeError):
+                foto = None
         id_int = db.execute(_INSERT, {
             "puerta": puerta, "empresa": empresa, "tipo": tipo,
-            "sim": sim, "disp": settings.KIOSK_DISPOSITIVO,
+            "sim": sim, "disp": settings.KIOSK_DISPOSITIVO, "foto": foto,
         }).scalar()
         db.commit()
-        logger.info("intento local %s (%s) → puerta %s [pendiente sync]", id_int, tipo, puerta)
+        logger.info("intento local %s (%s) → puerta %s [pendiente sync%s]",
+                    id_int, tipo, puerta, ", con foto" if foto else "")
         return str(id_int)
 
 

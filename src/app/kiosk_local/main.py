@@ -43,6 +43,9 @@ async def lifespan(app: FastAPI):
         # que la nube rechazó fila-por-fila, y así NO reintentarlos en bucle en cada ciclo.
         db.execute(text("ALTER TABLE intentos_acceso ADD COLUMN IF NOT EXISTS "
                         "sync_rechazado BOOLEAN NOT NULL DEFAULT FALSE"))
+        # Foto de evidencia (recorte JPEG) en cola de subida a media. Se limpia (NULL)
+        # una vez subida. Columna kiosk-only (la nube guarda la foto en 'media', no aquí).
+        db.execute(text("ALTER TABLE intentos_acceso ADD COLUMN IF NOT EXISTS foto_bytes BYTEA"))
         db.commit()
     except Exception as exc:
         logger.warning("kiosk_local: no se pudo asegurar la columna sync_rechazado: %s", exc)

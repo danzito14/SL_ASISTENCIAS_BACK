@@ -55,6 +55,19 @@ _MARCAR_INT_RECH = text(
 _COLS_INT = ["id_intento", "id_puerta", "id_empresa", "tipo", "id_trabajador", "similitud",
              "creado_en_cliente", "id_dispositivo_origen", "latitud", "longitud"]
 
+# ── Fotos de evidencia de intentos (subir a media DESPUÉS del CSV) ────────────
+# Solo intentos YA subidos por CSV (sincronizado_en NOT NULL) y no rechazados: así
+# la fila ya existe en la nube y el POST /off_sync/intentos/foto la encuentra por id.
+_FOTO_BATCH = 20   # las fotos pesan; pocas por ciclo
+_PENDIENTES_FOTO = text("""
+    SELECT id_intento, foto_bytes
+    FROM intentos_acceso
+    WHERE foto_bytes IS NOT NULL AND sincronizado_en IS NOT NULL AND NOT sync_rechazado
+    ORDER BY fecha
+    LIMIT :lim
+""")
+_LIMPIAR_FOTO = text("UPDATE intentos_acceso SET foto_bytes = NULL WHERE id_intento = :id")
+
 
 def _csv(filas) -> bytes:
     buf = io.StringIO()
@@ -140,10 +153,35 @@ class SyncService:
         finally:
             db.close()
 
+    def subir_fotos_pendientes(self) -> dict:
+        """Sube las fotos de evidencia de intentos YA subidos por CSV a media (POST
+        /off_sync/intentos/foto). Al subir cada una, limpia foto_bytes (NULL). Un 404
+        (intento aún no ingerido en la nube) o un fallo dejan la foto para el próximo ciclo."""
+        db = SessionLocal()
+        subidas = 0
+        try:
+            filas = db.execute(_PENDIENTES_FOTO, {"lim": _FOTO_BATCH}).all()
+            if not filas:
+                return {"pendientes": 0}
+            for f in filas:
+                try:
+                    cloud_client.subir_intento_foto(str(f.id_intento), bytes(f.foto_bytes))
+                    db.execute(_LIMPIAR_FOTO, {"id": str(f.id_intento)})
+                    db.commit()
+                    subidas += 1
+                except Exception as exc:
+                    db.rollback()
+                    logger.debug("sync foto intento %s: pendiente (%s)", f.id_intento, exc)
+            if subidas:
+                logger.info("sync fotos: %d fotos de intento subidas.", subidas)
+            return {"subidas": subidas}
+        finally:
+            db.close()
+
     def correr_loop(self, stop: threading.Event) -> None:
         """Loop en background: cada KIOSK_SYNC_INTERVAL_SEG intenta subir las colas
-        (asistencias e intentos). Si no hay internet, falla silencioso y reintenta al
-        siguiente ciclo (nada se pierde)."""
+        (asistencias, intentos y sus fotos). Si no hay internet, falla silencioso y
+        reintenta al siguiente ciclo (nada se pierde)."""
         logger.info("sync: loop iniciado (cada %.0fs, lote %d).",
                     settings.KIOSK_SYNC_INTERVAL_SEG, settings.KIOSK_SYNC_BATCH)
         while not stop.is_set():
@@ -159,6 +197,12 @@ class SyncService:
                     logger.info("sync intentos: %s", ri)
             except Exception as exc:
                 logger.debug("sync: sin subir intentos (¿sin internet?): %s", exc)
+            try:
+                rf = self.subir_fotos_pendientes()
+                if rf.get("subidas"):
+                    logger.info("sync fotos: %s", rf)
+            except Exception as exc:
+                logger.debug("sync: sin subir fotos (¿sin internet?): %s", exc)
             stop.wait(settings.KIOSK_SYNC_INTERVAL_SEG)
         logger.info("sync: loop detenido.")
 

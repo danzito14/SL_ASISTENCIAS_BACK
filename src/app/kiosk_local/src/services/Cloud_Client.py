@@ -141,6 +141,23 @@ class CloudClient:
             return r.json()
         raise RuntimeError("cloud: no se pudo autenticar para subir la cola de intentos.")
 
+    def subir_intento_foto(self, id_intento: str, foto: bytes) -> dict:
+        """Sube la foto de evidencia de un intento YA subido por CSV (POST /off_sync/intentos/foto,
+        multipart: id_intento + foto). Devuelve {ok, ruta_foto}. Lanza en 404 (el intento aún no
+        se ingirió en la nube → reintentar luego) y otros errores."""
+        for intento in (1, 2):
+            token = self._token_asegurar()
+            r = self._client.post("/off_sync/intentos/foto",
+                                  data={"id_intento": id_intento},
+                                  files={"foto": (f"intento_{id_intento}.jpg", foto, "image/jpeg")},
+                                  headers={"Authorization": f"Bearer {token}"})
+            if r.status_code == 401 and intento == 1 and not self._token_externo:
+                self._invalidar()
+                continue
+            r.raise_for_status()
+            return r.json()
+        raise RuntimeError("cloud: no se pudo autenticar para subir la foto del intento.")
+
     def hay_conexion(self) -> bool:
         try:
             self._client.get("/off_sync/estado",

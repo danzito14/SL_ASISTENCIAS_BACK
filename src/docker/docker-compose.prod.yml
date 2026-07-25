@@ -452,6 +452,11 @@ services:
       ENROL_MODELO_IA: "buffalo_l"
       # Modelos que sirve GET /off_sync/modelo/{nombre} para que el APK los baje.
       MODELOS_DIR: /models
+      # Microservicio media: guardar la foto de evidencia de intentos capturados offline
+      # (POST /off_sync/intentos/foto → media → intentos_acceso.ruta_foto). Mismo token
+      # interno que el backend/media (no se expone; red interna de Docker).
+      MEDIA_SERVICE_URL: "http://media:8000"
+      MEDIA_INTERNAL_TOKEN: ${MEDIA_INTERNAL_TOKEN}
     volumes:
       # Carpeta (gitignored) con los .onnx que baja el APK. Copiar w600k_r50.onnx
       # del contenedor recognition y el anti-spoof del repo. Ver README de deploy.
