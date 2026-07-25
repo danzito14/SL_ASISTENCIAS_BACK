@@ -103,7 +103,11 @@ def reconocer_liveness(fotos: list[UploadFile] = File(...), id_empresa: int | No
             return {"estado": "pocos_rostros", "n": len(caras)}
         live = motor.evaluar_liveness(caras)
         if not live["vivo"]:
-            return {"estado": "no_vivo", "motivo": live["motivo"]}
+            # Recorte de evidencia (mejor frame) para que el edge/kiosko guarde la foto
+            # del intento no_vivo (foto en pantalla detectada por falta de movimiento).
+            ev_frame, ev_cara = max(pares, key=lambda p: p[1]["det_score"])
+            return {"estado": "no_vivo", "motivo": live["motivo"],
+                    "recorte_b64": _b64(motor.recorte_jpeg(ev_frame, ev_cara))}
         mejor_frame, mejor = max(pares, key=lambda p: p[1]["det_score"])
         # Gate de calidad sobre el mejor frame (no-op si está apagado por env).
         calidad = motor.evaluar_calidad(mejor)

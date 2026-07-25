@@ -3,7 +3,7 @@ import hashlib
 import logging
 import os
 
-from fastapi import (APIRouter, Depends, File, HTTPException, Query, Request,
+from fastapi import (APIRouter, Depends, File, Form, HTTPException, Query, Request,
                      UploadFile, status)
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
@@ -150,6 +150,36 @@ async def subir_intentos(
     principal = usuario_actual(request)
     contenido = (await archivo.read()).decode("utf-8-sig")
     return ingesta_service.ingerir_intentos(db, contenido, principal)
+
+
+# ── Subida: foto de evidencia de un intento (capturado offline) ───────────────
+@router.post(
+    "/intentos/foto",
+    summary="Adjuntar la foto de evidencia de un intento (multipart)",
+    description="El edge/kiosko sube la foto del intento (ya subido por CSV) por su "
+                "id_intento. Se guarda en 'media' y se pone la ruta en intentos_acceso."
+                "ruta_foto. Si el intento aún no está ingerido, responde 404 (reintentar).",
+)
+async def subir_intento_foto(
+    request: Request,
+    id_intento: str = Form(..., description="UUID del intento (el mismo del CSV)"),
+    foto: UploadFile = File(..., description="Foto de evidencia (JPEG)"),
+    db: Session = Depends(get_db),
+):
+    principal = usuario_actual(request)
+    contenido = await foto.read()
+    if not contenido:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="La imagen está vacía.")
+    try:
+        res = ingesta_service.adjuntar_foto_intento(db, id_intento, contenido, principal)
+    except ValueError as e:
+        code = status.HTTP_403_FORBIDDEN if str(e) == "empresa_no_permitida" else status.HTTP_400_BAD_REQUEST
+        raise HTTPException(status_code=code, detail=str(e))
+    if not res["ok"] and res.get("motivo") == "intento_no_encontrado":
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="intento_no_encontrado")
+    if not res["ok"]:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=res.get("motivo", "error"))
+    return res
 
 
 # ── Subida: enrolamientos walk-in (JSON) ──────────────────────────────────────

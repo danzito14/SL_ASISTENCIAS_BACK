@@ -36,6 +36,14 @@ class Settings(BaseSettings):
     # GET /off_sync/modelo/{nombre}. Carpeta (montada como volumen) con los .onnx.
     MODELOS_DIR: str = "/models"
 
+    # ── Microservicio media (fotos de evidencia de intentos capturados offline) ─
+    # El edge/kiosko sube la foto del intento por POST /off_sync/intentos/foto; este
+    # servicio la guarda en 'media' (igual que el scanner online) y pone la ruta en
+    # intentos_acceso.ruta_foto. Token interno compartido con media.
+    MEDIA_SERVICE_URL:    str = "http://media:8000"
+    MEDIA_URL:            str = "/media"   # prefijo web que se guarda en ruta_foto
+    MEDIA_INTERNAL_TOKEN: str = ""
+
     # ── Auth — el gateway valida el JWT; aquí solo se leen headers X-* y scopes ─
     EMPRESA_ADMIN: int = 99
     GATEWAY_INTERNAL_TOKEN: str = ""  # X-Gateway-Token que inyecta Traefik; vacío = no se exige

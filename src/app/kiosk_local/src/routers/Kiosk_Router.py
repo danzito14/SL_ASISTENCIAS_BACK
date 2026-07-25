@@ -165,12 +165,14 @@ async def acceso(
                 logger.warning("acceso: fallback a la nube falló: %s", exc)
         # Sin internet o fallback falló → encolar el intento local (desconocido).
         sim = (res.get("candidato_global") or {}).get("similitud")
-        await run_in_threadpool(intento_service.registrar_fallido, db, "no_match", id_empresa, id_puerta, sim)
+        await run_in_threadpool(intento_service.registrar_fallido, db, "no_match", id_empresa,
+                                id_puerta, sim, res.get("recorte_b64"))
         return {"acceso": False, "origen": "local", "estado": "no_match",
                 "mensaje": "Rostro no reconocido (sin match local ni en la nube)."}
 
     # 3) no_rostro / spoof → encolar el intento local (estos no tienen fallback a la nube).
-    await run_in_threadpool(intento_service.registrar_fallido, db, estado, id_empresa, id_puerta)
+    await run_in_threadpool(intento_service.registrar_fallido, db, estado, id_empresa,
+                            id_puerta, None, res.get("recorte_b64"))
     return {"acceso": False, "origen": "local", "estado": estado,
             "mensaje": "No se reconoció un rostro válido."}
 
@@ -214,12 +216,14 @@ async def acceso_liveness(
 
     # PRUEBA DE VIDA fallida (foto estática, sin movimiento) → encolar intento + rechazar.
     if estado == "no_vivo":
-        await run_in_threadpool(intento_service.registrar_fallido, db, "no_vivo", id_empresa, id_puerta)
+        await run_in_threadpool(intento_service.registrar_fallido, db, "no_vivo", id_empresa,
+                                id_puerta, None, res.get("recorte_b64"))
         return {"acceso": False, "origen": "local", "estado": "no_vivo", "motivo": res.get("motivo"),
                 "mensaje": "Prueba de vida fallida (¿una foto?). Mira a la cámara y muévete un poco."}
     # Anti-spoof pasivo (foto/pantalla) → encolar intento + rechazar.
     if estado == "spoof":
-        await run_in_threadpool(intento_service.registrar_fallido, db, "spoof", id_empresa, id_puerta)
+        await run_in_threadpool(intento_service.registrar_fallido, db, "spoof", id_empresa,
+                                id_puerta, None, res.get("recorte_b64"))
         return {"acceso": False, "origen": "local", "estado": "spoof",
                 "mensaje": "Se detectó una foto o pantalla, no una persona real."}
 
@@ -244,7 +248,8 @@ async def acceso_liveness(
             except Exception as exc:
                 logger.warning("acceso_liveness: fallback a la nube falló: %s", exc)
         sim = (res.get("candidato_global") or {}).get("similitud")
-        await run_in_threadpool(intento_service.registrar_fallido, db, "no_match", id_empresa, id_puerta, sim)
+        await run_in_threadpool(intento_service.registrar_fallido, db, "no_match", id_empresa,
+                                id_puerta, sim, res.get("recorte_b64"))
         return {"acceso": False, "origen": "local", "estado": "no_match",
                 "mensaje": "Rostro no reconocido (sin match local ni en la nube)."}
 
@@ -262,7 +267,8 @@ def sync_eventos():
     try:
         asistencias = sync_service.subir_pendientes()
         intentos = sync_service.subir_intentos_pendientes()
-        return {"asistencias": asistencias, "intentos": intentos}
+        fotos = sync_service.subir_fotos_pendientes()
+        return {"asistencias": asistencias, "intentos": intentos, "fotos": fotos}
     except Exception as exc:
         logger.error("sync_eventos: %s", exc)
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY,
@@ -271,8 +277,8 @@ def sync_eventos():
 
 @router.get("/estado", summary="Estado del roster local (conteos + versión)")
 def estado(db: Session = Depends(get_db)):
-    out: dict = {"trabajadores": 0, "embeddings_activos": 0,
-                 "pendientes_asistencias": 0, "pendientes_intentos": 0, "meta": {}}
+    out: dict = {"trabajadores": 0, "embeddings_activos": 0, "pendientes_asistencias": 0,
+                 "pendientes_intentos": 0, "pendientes_fotos": 0, "meta": {}}
     try:
         out["trabajadores"] = db.execute(text("SELECT count(*) FROM trabajadores")).scalar()
         out["embeddings_activos"] = db.execute(
@@ -282,6 +288,8 @@ def estado(db: Session = Depends(get_db)):
             text("SELECT count(*) FROM escaneos WHERE sincronizado_en IS NULL")).scalar()
         out["pendientes_intentos"] = db.execute(text(
             "SELECT count(*) FROM intentos_acceso WHERE sincronizado_en IS NULL AND NOT sync_rechazado")).scalar()
+        out["pendientes_fotos"] = db.execute(text(
+            "SELECT count(*) FROM intentos_acceso WHERE foto_bytes IS NOT NULL")).scalar()
         existe = db.execute(text("SELECT to_regclass('kiosk_meta')")).scalar()
         if existe:
             out["meta"] = {k: v for k, v in db.execute(text("SELECT clave, valor FROM kiosk_meta")).all()}

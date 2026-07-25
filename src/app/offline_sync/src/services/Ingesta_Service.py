@@ -31,6 +31,7 @@ from sqlalchemy.orm import Session
 from src.core.auth import Principal, es_admin
 from src.core.config import settings
 from src.schemas.Ingesta_Schema import FilaRechazada, IngestaResponse
+from src.services.Media_Client import media_client
 
 logger = logging.getLogger(__name__)
 
@@ -223,6 +224,33 @@ class IngestaService:
         db.commit()
         return IngestaResponse(recibidos=recibidos, insertados=insertados,
                                duplicados=duplicados, rechazados=rechazados)
+
+    # ── FOTO de evidencia de un intento (capturado offline) ────────────────────
+    def adjuntar_foto_intento(self, db: Session, id_intento: str, foto: bytes,
+                              principal: Principal) -> dict:
+        """Guarda la foto de evidencia en 'media' y pone la ruta en intentos_acceso.ruta_foto.
+        El intento debe existir (subido antes por CSV) y ser de la empresa del usuario.
+        Devuelve {ok, ruta_foto} o {ok:False, motivo}. Idempotente: re-subir sobreescribe."""
+        try:
+            iid = str(_uuid(id_intento))
+        except (ValueError, TypeError):
+            raise ValueError("id_intento_invalido")
+        row = db.execute(
+            text("SELECT id_empresa FROM intentos_acceso WHERE id_intento = :id"),
+            {"id": iid}).first()
+        if row is None:
+            # Aún no ingerido por CSV (o rechazado): el edge reintenta la foto luego.
+            return {"ok": False, "motivo": "intento_no_encontrado"}
+        if not es_admin(principal) and row.id_empresa != principal.empresa:
+            raise ValueError("empresa_no_permitida")
+        ruta = media_client.guardar_bytes(foto, "intentos", f"intento_{iid}.jpg")
+        if ruta is None:
+            return {"ok": False, "motivo": "media_no_disponible"}
+        db.execute(text("UPDATE intentos_acceso SET ruta_foto = :ruta WHERE id_intento = :id"),
+                   {"ruta": ruta, "id": iid})
+        db.commit()
+        logger.info("intento %s: foto de evidencia guardada en %s", iid, ruta)
+        return {"ok": True, "ruta_foto": ruta}
 
     def _empresa_ok(self, id_empresa, principal: Principal) -> None:
         if id_empresa is None:
