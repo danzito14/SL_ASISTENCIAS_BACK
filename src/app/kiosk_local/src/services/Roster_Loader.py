@@ -18,6 +18,16 @@ _META = text("""
         clave TEXT PRIMARY KEY, valor TEXT, actualizado TIMESTAMPTZ DEFAULT NOW()
     )
 """)
+
+# Reemplazo TOTAL del padrón local: vacía trabajadores + embeddings antes de recargar,
+# para que la estación quede SOLO con la empresa/tipo que se baja ahora. Objetivo del
+# local-first: pocos rostros que buscar = búsqueda pgvector más rápida y precisa. Al
+# cambiar de empresa (fin de temporada, etc.) NO deben quedar rostros residuales.
+# SEGURO para la cola de subida: 'escaneos.id_trabajador' es enlace SUAVE (sin FK) y NO
+# se tocan 'puertas' (que sí referencian escaneos), así que los fichajes pendientes de
+# subir se conservan. Se borra embeddings primero (hijo de trabajadores por FK).
+_WIPE_EMB = text("DELETE FROM embeddings")
+_WIPE_TRAB = text("DELETE FROM trabajadores")
 _SET_META = text("""
     INSERT INTO kiosk_meta (clave, valor) VALUES (:clave, :valor)
     ON CONFLICT (clave) DO UPDATE SET valor = EXCLUDED.valor, actualizado = NOW()
@@ -67,9 +77,17 @@ _UP_EMB = text("""
 
 class RosterLoader:
 
-    def cargar(self, db: Session, roster: dict) -> dict:
+    def cargar(self, db: Session, roster: dict, reemplazar: bool = True) -> dict:
         empresa = roster["empresa"]
         db.execute(_META)
+        # Reemplazo total (default): vacía el padrón local antes de recargar, para que
+        # quede SOLO la empresa/tipo que se baja ahora (sin rostros residuales de otras
+        # empresas que ensucien/ralenticen la lectura). Todo en la MISMA transacción: si
+        # la carga falla, el rollback deja el padrón anterior intacto. La cola de escaneos
+        # NO se toca (enlace suave + no se borran puertas). reemplazar=False = merge (UPSERT).
+        if reemplazar:
+            db.execute(_WIPE_EMB)
+            db.execute(_WIPE_TRAB)
         db.execute(_UP_EMPRESA, {"id": empresa, "nombre": f"Empresa {empresa}", "tz": settings.KIOSK_TZ})
 
         for a in roster.get("areas", []):

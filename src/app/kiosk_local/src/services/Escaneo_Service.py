@@ -36,11 +36,16 @@ class EscaneoService:
         return p
 
     def registrar_local(self, db: Session, id_trabajador: int, similitud: float | None,
-                        id_puerta: int | None = None, tipo_registro: str = "entrada") -> str:
+                        id_puerta: int | None = None, tipo_registro: str = "entrada",
+                        id_empresa: int | None = None) -> str:
         puerta = self._puerta(db, id_puerta)
         conf = None if similitud is None else min(max(float(similitud), 0.0), 1.0)
+        # Sella el escaneo con la empresa ACTIVA (la del usuario logueado / último sync);
+        # si no se pasó, cae al KIOSK_EMPRESA de respaldo. Debe ser la correcta: la nube
+        # deriva entrada/salida y consolida por empresa al recibir el lote.
+        empresa = id_empresa if id_empresa is not None else settings.KIOSK_EMPRESA
         id_esc = db.execute(_INSERT, {
-            "trab": id_trabajador, "puerta": puerta, "empresa": settings.KIOSK_EMPRESA,
+            "trab": id_trabajador, "puerta": puerta, "empresa": empresa,
             "tipo": tipo_registro, "conf": conf, "disp": settings.KIOSK_DISPOSITIVO,
         }).scalar()
         db.commit()

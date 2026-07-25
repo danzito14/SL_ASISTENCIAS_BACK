@@ -33,6 +33,28 @@ _COLS = ["id_asistencia", "id_trabajador", "id_puerta", "id_empresa", "tipo_regi
          "creado_en_cliente", "confianza_biometrica", "dentro_de_area",
          "id_dispositivo_origen", "latitud", "longitud"]
 
+# ── Intentos fallidos (mismo mecanismo, contra /off_sync/intentos) ────────────
+# Pendientes = sin subir Y no rechazados por la nube (sync_rechazado se marca aparte
+# para no reintentar en bucle una fila que la nube rechaza fila-por-fila, p.ej. por FK).
+_PENDIENTES_INT = text("""
+    SELECT id_intento, id_puerta, id_empresa, tipo, id_trabajador, similitud,
+           creado_en_cliente, id_dispositivo_origen
+    FROM intentos_acceso
+    WHERE sincronizado_en IS NULL AND NOT sync_rechazado
+    ORDER BY fecha
+    LIMIT :lim
+""")
+_MARCAR_INT_OK = text(
+    "UPDATE intentos_acceso SET sincronizado_en = NOW() WHERE id_intento IN :ids"
+).bindparams(bindparam("ids", expanding=True))
+_MARCAR_INT_RECH = text(
+    "UPDATE intentos_acceso SET sync_rechazado = TRUE WHERE id_intento IN :ids"
+).bindparams(bindparam("ids", expanding=True))
+
+# Columnas EXACTAS que espera POST /off_sync/intentos.
+_COLS_INT = ["id_intento", "id_puerta", "id_empresa", "tipo", "id_trabajador", "similitud",
+             "creado_en_cliente", "id_dispositivo_origen", "latitud", "longitud"]
+
 
 def _csv(filas) -> bytes:
     buf = io.StringIO()
@@ -46,6 +68,22 @@ def _csv(filas) -> bytes:
             "" if f.dentro_de_area is None else f.dentro_de_area,
             f.id_dispositivo_origen if f.id_dispositivo_origen is not None else "",
             "", "",   # latitud, longitud (el kiosko de escritorio no tiene GPS)
+        ])
+    return buf.getvalue().encode("utf-8")
+
+
+def _csv_intentos(filas) -> bytes:
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(_COLS_INT)
+    for f in filas:
+        w.writerow([
+            f.id_intento, f.id_puerta, f.id_empresa, f.tipo,
+            f.id_trabajador if f.id_trabajador is not None else "",
+            f.similitud if f.similitud is not None else "",
+            f.creado_en_cliente.isoformat() if f.creado_en_cliente else "",
+            f.id_dispositivo_origen if f.id_dispositivo_origen is not None else "",
+            "", "",   # latitud, longitud (sin GPS)
         ])
     return buf.getvalue().encode("utf-8")
 
@@ -73,9 +111,39 @@ class SyncService:
         finally:
             db.close()
 
+    def subir_intentos_pendientes(self) -> dict:
+        """Sube UN lote de intentos fallidos pendientes. Marca insertados+duplicados como
+        sincronizados y los rechazados APARTE (sync_rechazado) para no reintentarlos en
+        bucle. Lanza si no hay red."""
+        db = SessionLocal()
+        try:
+            filas = db.execute(_PENDIENTES_INT, {"lim": settings.KIOSK_SYNC_BATCH}).all()
+            if not filas:
+                return {"pendientes": 0}
+            resp = cloud_client.subir_intentos(_csv_intentos(filas))   # lanza si no hay internet
+            rech = resp.get("rechazados") or []
+            rech_ids = {str(r["id"]) for r in rech if r.get("id")}
+            todos = [str(f.id_intento) for f in filas]
+            ok_ids = [i for i in todos if i not in rech_ids]           # insertados + duplicados
+            if ok_ids:
+                db.execute(_MARCAR_INT_OK, {"ids": ok_ids})
+            if rech_ids:
+                db.execute(_MARCAR_INT_RECH, {"ids": list(rech_ids)})  # no reintentar
+            db.commit()
+            logger.info("sync intentos: subidos %d (insertados=%s duplicados=%s rechazados=%d)",
+                        len(ok_ids), resp.get("insertados"), resp.get("duplicados"), len(rech_ids))
+            if rech_ids:
+                logger.warning("sync intentos: la nube rechazó %d (marcados aparte): %s",
+                               len(rech_ids), rech[:5])
+            return {"subidos": len(ok_ids), "insertados": resp.get("insertados"),
+                    "duplicados": resp.get("duplicados"), "rechazados": len(rech_ids)}
+        finally:
+            db.close()
+
     def correr_loop(self, stop: threading.Event) -> None:
-        """Loop en background: cada KIOSK_SYNC_INTERVAL_SEG intenta subir la cola. Si no hay
-        internet, falla silencioso y reintenta al siguiente ciclo (nada se pierde)."""
+        """Loop en background: cada KIOSK_SYNC_INTERVAL_SEG intenta subir las colas
+        (asistencias e intentos). Si no hay internet, falla silencioso y reintenta al
+        siguiente ciclo (nada se pierde)."""
         logger.info("sync: loop iniciado (cada %.0fs, lote %d).",
                     settings.KIOSK_SYNC_INTERVAL_SEG, settings.KIOSK_SYNC_BATCH)
         while not stop.is_set():
@@ -84,7 +152,13 @@ class SyncService:
                 if r.get("subidos"):
                     logger.info("sync: %s", r)
             except Exception as exc:
-                logger.debug("sync: sin subir (¿sin internet?): %s", exc)
+                logger.debug("sync: sin subir asistencias (¿sin internet?): %s", exc)
+            try:
+                ri = self.subir_intentos_pendientes()
+                if ri.get("subidos"):
+                    logger.info("sync intentos: %s", ri)
+            except Exception as exc:
+                logger.debug("sync: sin subir intentos (¿sin internet?): %s", exc)
             stop.wait(settings.KIOSK_SYNC_INTERVAL_SEG)
         logger.info("sync: loop detenido.")
 

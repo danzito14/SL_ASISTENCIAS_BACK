@@ -32,6 +32,21 @@ class RecognitionClient:
         r.raise_for_status()
         return r.json()
 
+    def reconocer_liveness(self, fotos: list[bytes], id_empresa: int | None,
+                           nombre_hint: str | None = None) -> dict:
+        """N fotos → /reconocer-liveness: valida MOVIMIENTO entre frames (foto estática =
+        'no_vivo') + anti-spoof pasivo + match local. Devuelve el dict de recognition
+        {estado: match|no_match|no_vivo|spoof|pocos_rostros|baja_calidad, trabajador?, ...}."""
+        files = [("fotos", (f"f{i}.jpg", b, "image/jpeg")) for i, b in enumerate(fotos)]
+        data: dict = {}
+        if id_empresa is not None:
+            data["id_empresa"] = id_empresa
+        if nombre_hint:
+            data["nombre_hint"] = nombre_hint
+        r = self._client.post("/reconocer-liveness", headers=self._headers(), files=files, data=data)
+        r.raise_for_status()
+        return r.json()
+
     def disponible(self) -> bool:
         try:
             self._client.get("/health", timeout=5.0).raise_for_status()

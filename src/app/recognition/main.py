@@ -71,6 +71,13 @@ def reconocer(foto: UploadFile = File(...), id_empresa: int | None = Form(None),
         cara = motor.detectar_y_extraer(frame)
         if cara is None:
             return {"estado": "no_rostro"}
+        # Gate de calidad ANTES del match: si el frame es malo (borroso, cara cortada,
+        # muy lejos), no vale la pena reconocerlo ni marcarlo como 'no_match'. Devuelve
+        # 'baja_calidad' con el motivo (no-op si el gate está apagado por env).
+        calidad = motor.evaluar_calidad(cara)
+        if not calidad["ok"]:
+            return {"estado": "baja_calidad", "motivo": calidad["motivo"],
+                    "det_score": cara["det_score"], "face_ratio": cara["face_ratio"], "blur": cara["blur"]}
         anti = motor.evaluar_antispoof(frame, cara)
         if anti is not None and not anti["es_real"]:
             return {"estado": "spoof", "score_real": anti["score_real"], "recorte_b64": _b64(motor.recorte_jpeg(frame, cara))}
@@ -98,6 +105,11 @@ def reconocer_liveness(fotos: list[UploadFile] = File(...), id_empresa: int | No
         if not live["vivo"]:
             return {"estado": "no_vivo", "motivo": live["motivo"]}
         mejor_frame, mejor = max(pares, key=lambda p: p[1]["det_score"])
+        # Gate de calidad sobre el mejor frame (no-op si está apagado por env).
+        calidad = motor.evaluar_calidad(mejor)
+        if not calidad["ok"]:
+            return {"estado": "baja_calidad", "motivo": calidad["motivo"],
+                    "det_score": mejor["det_score"], "face_ratio": mejor["face_ratio"], "blur": mejor["blur"]}
         anti = motor.evaluar_antispoof(mejor_frame, mejor)
         if anti is not None and not anti["es_real"]:
             return {"estado": "spoof", "score_real": anti["score_real"], "recorte_b64": _b64(motor.recorte_jpeg(mejor_frame, mejor))}
