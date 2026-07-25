@@ -86,7 +86,26 @@ services:
       # muy de cerca da FALSO spoof (recorte de contexto 2.7× se sale). DEFAULT OFF hasta
       # validarlo/afinarlo con capturas reales a distancia de kiosko (KIOSK_ANTISPOOF=true).
       ANTISPOOFING_ACTIVO: ${KIOSK_ANTISPOOF:-false}
-      ANTISPOOF_UMBRAL: ${KIOSK_ANTISPOOF_UMBRAL:-0.5}
+      # Params del modelo anti-spoof: MISMOS que prod (validados). CRÍTICO: div255=false y
+      # real_index=1 definen el preprocesamiento correcto; con otros valores el modelo da
+      # resultados basura (probable causa del "falla en webcam" reportado antes). Activar con
+      # KIOSK_ANTISPOOF=true y CALIBRAR el umbral con capturas reales del kiosko (ver logs
+      # de recognition: 'Anti-spoof: probs=... score_real=... es_real=').
+      ANTISPOOF_UMBRAL: ${KIOSK_ANTISPOOF_UMBRAL:-0.6}
+      ANTISPOOF_REAL_INDEX: ${KIOSK_ANTISPOOF_REAL_INDEX:-1}
+      ANTISPOOF_DIV255: ${KIOSK_ANTISPOOF_DIV255:-false}
+      # ── Gate de CALIDAD del frame (solo el kiosko; prod/cámaras no lo usan) ──────
+      # Descarta frames malos (borrosos, cara cortada, muy lejos, detección débil) antes
+      # del match → estado "baja_calidad", que kiosk_local trata como "sigue intentando".
+      # OJO: los umbrales de abajo son de ARRANQUE; CALIBRAR con capturas reales de la
+      # webcam del kiosko (mirar los logs de recognition: det_score/face_ratio/blur de los
+      # frames que rechaza vs los buenos). Muy agresivo = rechaza gente real. Poner 0 en
+      # cualquiera lo desactiva; CALIDAD_GATE_ACTIVO=false apaga el gate completo.
+      CALIDAD_GATE_ACTIVO: ${KIOSK_CALIDAD_GATE:-true}
+      CALIDAD_DET_SCORE_MIN: ${KIOSK_CALIDAD_DET_SCORE_MIN:-0.6}   # confianza de detección (0..1)
+      CALIDAD_FACE_RATIO_MIN: ${KIOSK_CALIDAD_FACE_RATIO_MIN:-0.03} # área cara / área imagen
+      CALIDAD_BLUR_MIN: ${KIOSK_CALIDAD_BLUR_MIN:-40}              # varianza Laplaciano (nitidez)
+      CALIDAD_BORDE_MARGEN: ${KIOSK_CALIDAD_BORDE_MARGEN:-0.01}    # fracción del borde → cara parcial
     depends_on:
       kiosk_postgres:
         condition: service_healthy

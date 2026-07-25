@@ -145,6 +145,34 @@ class Motor:
             "blur": self._nitidez(frame, bbox),
         }
 
+    def evaluar_calidad(self, cara: dict) -> dict:
+        """Gate de calidad del frame para el camino de reconocimiento (NO enrolamiento).
+        Devuelve {"ok": bool, "motivo": str|None}. Reusa las señales que ya calcula
+        `detectar_y_extraer` (det_score, face_ratio, blur, bbox). Solo actúa si
+        CALIDAD_GATE_ACTIVO; cada umbral en 0 desactiva ese check (así prod/vigilancia
+        no cambian salvo configuración explícita). Los motivos ('borrosa', 'cara_parcial',
+        'muy_lejos', 'deteccion_debil') sirven para que el front dé una pista al usuario."""
+        if not settings.CALIDAD_GATE_ACTIVO:
+            return {"ok": True, "motivo": None}
+        if settings.CALIDAD_DET_SCORE_MIN > 0 and cara["det_score"] < settings.CALIDAD_DET_SCORE_MIN:
+            return {"ok": False, "motivo": "deteccion_debil"}
+        if settings.CALIDAD_FACE_RATIO_MIN > 0 and cara["face_ratio"] < settings.CALIDAD_FACE_RATIO_MIN:
+            return {"ok": False, "motivo": "muy_lejos"}
+        if settings.CALIDAD_BORDE_MARGEN > 0 and self._cara_en_borde(cara):
+            return {"ok": False, "motivo": "cara_parcial"}
+        if settings.CALIDAD_BLUR_MIN > 0 and cara["blur"] < settings.CALIDAD_BLUR_MIN:
+            return {"ok": False, "motivo": "borrosa"}
+        return {"ok": True, "motivo": None}
+
+    def _cara_en_borde(self, cara: dict) -> bool:
+        """True si el bbox toca (o casi) un borde del frame → cara cortada/parcial.
+        'casi' = dentro de CALIDAD_BORDE_MARGEN * dimensión desde cada borde."""
+        x1, y1, x2, y2 = cara["bbox"]
+        w, h = cara["frame_w"], cara["frame_h"]
+        mx = settings.CALIDAD_BORDE_MARGEN * w
+        my = settings.CALIDAD_BORDE_MARGEN * h
+        return x1 <= mx or y1 <= my or x2 >= (w - mx) or y2 >= (h - my)
+
     def _nitidez(self, frame: np.ndarray, bbox) -> float:
         """Varianza del Laplaciano sobre el recorte de la cara (mayor = más nítida)."""
         h, w = frame.shape[:2]

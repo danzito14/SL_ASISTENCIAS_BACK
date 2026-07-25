@@ -16,8 +16,25 @@ logger = logging.getLogger(__name__)
 class CloudClient:
     def __init__(self) -> None:
         self._token: str | None = None
+        # True = el token lo puso el front (usuario logueado); False = login de respaldo
+        # con KIOSK_USER. Si un token EXTERNO da 401, NO se cae al login de respaldo (sería
+        # otra empresa): mejor fallar y que el front vuelva a iniciar sesión.
+        self._token_externo = False
         self._lock = threading.Lock()
         self._client = httpx.Client(base_url=settings.CLOUD_BASE_URL, timeout=settings.HTTP_TIMEOUT)
+
+    def set_token(self, token: str) -> None:
+        """Fija el token del usuario logueado en el front (reenviado por /kiosk/roster/sync).
+        Con esto la estación SIGUE al usuario: el roster y la subida salen de SU empresa.
+        El rol escaneador emite token sin expiración → sirve para el loop de subida y
+        sobrevive reinicios (se persiste en kiosk_meta y se recarga al arrancar)."""
+        with self._lock:
+            self._token = token
+            self._token_externo = True
+
+    def token_actual(self) -> str | None:
+        with self._lock:
+            return self._token
 
     def _login(self) -> None:
         r = self._client.post("/usuarios/login", json={
@@ -26,7 +43,8 @@ class CloudClient:
         })
         r.raise_for_status()
         self._token = r.json()["access_token"]
-        logger.info("cloud: login OK como %s", settings.KIOSK_USER)
+        self._token_externo = False
+        logger.info("cloud: login OK como %s (respaldo)", settings.KIOSK_USER)
 
     def _token_asegurar(self) -> str:
         with self._lock:
@@ -43,7 +61,7 @@ class CloudClient:
             token = self._token_asegurar()
             r = self._client.get(path, params=params or {},
                                  headers={"Authorization": f"Bearer {token}"})
-            if r.status_code == 401 and intento == 1:
+            if r.status_code == 401 and intento == 1 and not self._token_externo:
                 self._invalidar()
                 continue
             r.raise_for_status()
@@ -67,12 +85,29 @@ class CloudClient:
             r = self._client.post("/scanner/acceso/foto", params=params,
                                   files={"foto": ("foto.jpg", foto, "image/jpeg")},
                                   headers={"Authorization": f"Bearer {token}"})
-            if r.status_code == 401 and intento == 1:
+            if r.status_code == 401 and intento == 1 and not self._token_externo:
                 self._invalidar()
                 continue
             r.raise_for_status()
             return r.json()
         raise RuntimeError("cloud: no se pudo autenticar para el fallback.")
+
+    def acceso_nube_liveness(self, fotos: list[bytes], id_puerta: int, tipo_registro: str = "entrada") -> dict:
+        """FALLBACK liveness: sin match LOCAL y con internet, reenvía la RÁFAGA al scanner
+        de la nube (POST /scanner/acceso/liveness), que valida liveness + reconoce contra
+        TODA la empresa y registra allá. Devuelve el ScanResponse de la nube."""
+        params = {"id_puerta": id_puerta, "tipo_registro": tipo_registro}
+        files = [("fotos", (f"f{i}.jpg", b, "image/jpeg")) for i, b in enumerate(fotos)]
+        for intento in (1, 2):
+            token = self._token_asegurar()
+            r = self._client.post("/scanner/acceso/liveness", params=params, files=files,
+                                  headers={"Authorization": f"Bearer {token}"})
+            if r.status_code == 401 and intento == 1 and not self._token_externo:
+                self._invalidar()
+                continue
+            r.raise_for_status()
+            return r.json()
+        raise RuntimeError("cloud: no se pudo autenticar para el fallback liveness.")
 
     def subir_asistencias(self, csv_bytes: bytes) -> dict:
         """Sube la cola de escaneos a la nube (POST /off_sync/asistencias, CSV). La nube
@@ -83,12 +118,28 @@ class CloudClient:
             r = self._client.post("/off_sync/asistencias",
                                   files={"archivo": ("asistencias.csv", csv_bytes, "text/csv")},
                                   headers={"Authorization": f"Bearer {token}"})
-            if r.status_code == 401 and intento == 1:
+            if r.status_code == 401 and intento == 1 and not self._token_externo:
                 self._invalidar()
                 continue
             r.raise_for_status()
             return r.json()
         raise RuntimeError("cloud: no se pudo autenticar para subir la cola.")
+
+    def subir_intentos(self, csv_bytes: bytes) -> dict:
+        """Sube la cola de intentos fallidos a la nube (POST /off_sync/intentos, CSV,
+        campo 'archivo'). Idempotente por id_intento (UUID). Devuelve IngestaResponse
+        {recibidos, insertados, duplicados, rechazados:[{linea,id,motivo}]}."""
+        for intento in (1, 2):
+            token = self._token_asegurar()
+            r = self._client.post("/off_sync/intentos",
+                                  files={"archivo": ("intentos.csv", csv_bytes, "text/csv")},
+                                  headers={"Authorization": f"Bearer {token}"})
+            if r.status_code == 401 and intento == 1 and not self._token_externo:
+                self._invalidar()
+                continue
+            r.raise_for_status()
+            return r.json()
+        raise RuntimeError("cloud: no se pudo autenticar para subir la cola de intentos.")
 
     def hay_conexion(self) -> bool:
         try:
