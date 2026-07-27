@@ -103,10 +103,13 @@ var
 begin
   if CurStep = ssPostInstall then
   begin
+    // Barra indeterminada (marquee) DENTRO del wizard: el trabajo pesado (docker pull,
+    // modelo, up) no reporta % fino, pero así el usuario ve actividad sin abrir terminal.
+    WizardForm.ProgressGauge.Style := npbstMarquee;
     Tipo := Trim(DatosPage.Values[4]);
     if Tipo = '' then Tipo := 'oficina';
     WizardForm.StatusLabel.Caption :=
-      'Configurando el backend: Docker, secretos, modelo y arranque (puede tardar)...';
+      'Configurando el backend (Docker, imágenes, modelo y arranque). Puede tardar varios minutos...';
     Params :=
       '-NoProfile -ExecutionPolicy Bypass -File "' + ExpandConstant('{app}\instalar.ps1') + '"' +
       ' -CloudUrl "'      + Trim(DatosPage.Values[0]) + '"' +
@@ -115,11 +118,12 @@ begin
       ' -Empresa "'       + Trim(DatosPage.Values[3]) + '"' +
       ' -Tipo "'          + Tipo                       + '"' +
       ' -Registry "{#Registry}" -Version "{#AppVersion}"';
-    if not Exec('powershell.exe', Params, ExpandConstant('{app}'), SW_SHOW, ewWaitUntilTerminated, Code) then
+    // SW_HIDE: sin ventana de PowerShell. El detalle queda en {app}\instalar.log.
+    if not Exec('powershell.exe', Params, ExpandConstant('{app}'), SW_HIDE, ewWaitUntilTerminated, Code) then
       MsgBox('No se pudo iniciar la configuración del backend (PowerShell).', mbError, MB_OK)
     else if Code <> 0 then
       MsgBox('La configuración del backend terminó con avisos (código ' + IntToStr(Code) + ').' + #13#10 +
-             'Revisa la ventana de PowerShell o los logs de Docker.', mbInformation, MB_OK);
+             'Detalle en: ' + ExpandConstant('{app}\instalar.log'), mbInformation, MB_OK);
 
     // ── PASO DEL FRONT (Electron) — activo porque #define FrontUrl no está vacío ──
     // Descarga el instalador del front, le quita la "marca de internet" (para que
@@ -141,6 +145,7 @@ begin
              'Verifica tu conexión a internet e inténtalo de nuevo.', mbError, MB_OK);
     end;
 #endif
+    WizardForm.ProgressGauge.Style := npbstNormal;
   end;
 end;
 

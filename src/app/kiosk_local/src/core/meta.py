@@ -39,3 +39,13 @@ def empresa_actual(db: Session) -> int | None:
         return int(v) if v is not None else None
     except (TypeError, ValueError):
         return None
+
+
+def puerta_actual(db: Session) -> int | None:
+    """Puerta elegida desde el front (POST /kiosk/puerta), guardada en kiosk_meta. None si
+    no se ha elegido → el fichaje cae a KIOSK_PUERTA (env) o a la 1ª puerta activa."""
+    v = leer(db, "puerta")
+    try:
+        return int(v) if v is not None else None
+    except (TypeError, ValueError):
+        return None
