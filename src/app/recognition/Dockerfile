@@ -17,8 +17,13 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-# Pre-descargar buffalo_l (~300 MB) en build para que el contenedor sea autónomo.
-RUN python -c "from insightface.app import FaceAnalysis; FaceAnalysis(name='buffalo_l', providers=['CPUExecutionProvider']).prepare(ctx_id=0, det_size=(640, 640))"
+# buffalo_l (~300 MB): por DEFAULT se hornea → imagen autónoma (nube/dev, sin cambios).
+# Para el instalador de escritorio se publica con --build-arg BAKE_MODEL=false → imagen
+# LIGERA; el modelo se descarga en la instalación a un volumen montado en /root/.insightface.
+ARG BAKE_MODEL=true
+RUN if [ "$BAKE_MODEL" = "true" ]; then \
+        python -c "from insightface.app import FaceAnalysis; FaceAnalysis(name='buffalo_l', providers=['CPUExecutionProvider']).prepare(ctx_id=0, det_size=(640, 640))"; \
+    fi
 
 EXPOSE 8000
 

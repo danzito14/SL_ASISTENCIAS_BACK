@@ -15,14 +15,16 @@ param(
 $ErrorActionPreference = "Stop"
 $docker = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)  # -> src/docker
 
-Write-Host "== 1/3 Construyendo imágenes (postgres + recognition + kiosk_local) ==" -ForegroundColor Cyan
-docker compose -f "$docker/docker-compose.prod.yml" build postgres recognition
+Write-Host "== 1/3 Construyendo imágenes (postgres + recognition LIGERA + kiosk_local) ==" -ForegroundColor Cyan
+docker compose -f "$docker/docker-compose.prod.yml" build postgres
+# recognition SIN hornear buffalo_l (imagen ligera): el modelo se baja en la instalación.
+docker build --build-arg BAKE_MODEL=false -t sl-recognition:desktop "$docker/../app/recognition"
 docker compose -f "$docker/docker-compose.local.yml" -p kiosk build kiosk_local
 
 # Mapa imagen LOCAL -> imagen REMOTA (GHCR). postgres mantiene su tag pg17.
 $map = [ordered]@{
     "pgvector-postgis:pg17" = "$Namespace/pgvector-postgis:pg17"
-    "sl-recognition:latest" = "$Namespace/sl-recognition:$Version"
+    "sl-recognition:desktop" = "$Namespace/sl-recognition:$Version"
     "sl-kiosk-local:latest" = "$Namespace/sl-kiosk-local:$Version"
 }
 

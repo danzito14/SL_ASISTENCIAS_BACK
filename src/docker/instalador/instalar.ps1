@@ -1,0 +1,105 @@
+# instalar.ps1 — Motor del instalador del kiosko de escritorio (perfil BÁSICA).
+# Verifica Docker → pide URLs/credenciales de la empresa → genera .env con secretos
+# aleatorios → descarga imágenes (públicas, sin token) → baja el modelo buffalo_l a un
+# volumen → levanta el mini-stack → espera health → baja el padrón por primera vez.
+# El Electron/NSIS puede invocarlo pasando los parámetros (no interactivo) o dejar que
+# pregunte. Requiere Docker Desktop instalado y corriendo.
+
+param(
+    [string]$CloudUrl,                       # URL de la nube (ej. https://tu-dominio/api)
+    [string]$KioskUser,                      # usuario del kiosko (rol escaneador)
+    [string]$KioskPassword,                  # su contraseña
+    [string]$Empresa,                        # id de empresa
+    [string]$Tipo    = "oficina",            # campo | oficina | empaque | mixto
+    [string]$Puerta  = "",                   # id de puerta (opcional)
+    [string]$Registry = "ghcr.io/danzito14", # namespace de las imágenes públicas
+    [string]$Version  = "1.0.0"
+)
+$ErrorActionPreference = "Stop"
+$here = Split-Path -Parent $MyInvocation.MyCommand.Path
+$compose = Join-Path $here "docker-compose.desktop.yml"
+
+# ── 1. Docker ────────────────────────────────────────────────────────────────
+Write-Host "== 1/7 Verificando Docker ==" -ForegroundColor Cyan
+try { docker info *> $null } catch {
+    Write-Error "Docker no está instalado o no está corriendo. Instala Docker Desktop, ábrelo y reintenta."
+    exit 1
+}
+
+# ── 2. Datos de la empresa (pregunta lo que no venga por parámetro) ──────────
+Write-Host "== 2/7 Configuración ==" -ForegroundColor Cyan
+if (-not $CloudUrl)      { $CloudUrl = Read-Host "URL de la nube (ej. https://tu-dominio/api)" }
+if (-not $KioskUser)     { $KioskUser = Read-Host "Usuario del kiosko" }
+if (-not $KioskPassword) {
+    $sec = Read-Host "Contraseña del kiosko" -AsSecureString
+    $KioskPassword = [Runtime.InteropServices.Marshal]::PtrToStringAuto(
+        [Runtime.InteropServices.Marshal]::SecureStringToBSTR($sec))
+}
+if (-not $Empresa)       { $Empresa = Read-Host "ID de empresa" }
+
+# ── 3. Secretos + .env (UTF-8 sin BOM, para docker compose --env-file) ───────
+Write-Host "== 3/7 Generando secretos y .env ==" -ForegroundColor Cyan
+function New-Secret { -join ((48..57)+(65..90)+(97..122) | Get-Random -Count 40 | ForEach-Object {[char]$_}) }
+$envPath = Join-Path $here ".env"
+$contenido = @"
+# Generado por instalar.ps1 — NO subir a git. Contiene secretos de ESTA estación.
+REGISTRY=$Registry
+IMG_VERSION=$Version
+KIOSK_DB_PASSWORD=$(New-Secret)
+RECOGNITION_INTERNAL_TOKEN=$(New-Secret)
+CLOUD_BASE_URL=$CloudUrl
+KIOSK_USER=$KioskUser
+KIOSK_PASSWORD=$KioskPassword
+KIOSK_TIPO=$Tipo
+KIOSK_EMPRESA=$Empresa
+KIOSK_PUERTA=$Puerta
+KIOSK_DISPOSITIVO=$([Guid]::NewGuid().ToString("N").Substring(0,12))
+"@
+[System.IO.File]::WriteAllText($envPath, $contenido, (New-Object System.Text.UTF8Encoding($false)))
+Write-Host "   .env creado en $envPath"
+
+# El esquema + roles se montan en postgres: deben estar junto al compose (bundle del
+# instalador). Si corres desde el repo, se copian de la carpeta docker padre.
+foreach ($f in @("init.sql","roles_microservicio.sql")) {
+    $dst = Join-Path $here $f
+    if (-not (Test-Path $dst)) { Copy-Item (Join-Path $here ".." $f) $dst }
+}
+
+# ── 4. Descargar imágenes (públicas → sin login) ─────────────────────────────
+Write-Host "== 4/7 Descargando imágenes ==" -ForegroundColor Cyan
+docker compose -f $compose --env-file $envPath pull
+
+# ── 5. Descargar el modelo facial (buffalo_l ~300 MB) al volumen, una vez ─────
+Write-Host "== 5/7 Descargando el modelo facial (buffalo_l ~300 MB) ==" -ForegroundColor Cyan
+docker run --rm -v kiosk_modelos_insightface:/root/.insightface "$Registry/sl-recognition:$Version" `
+    python -c "from insightface.app import FaceAnalysis; FaceAnalysis(name='buffalo_l', providers=['CPUExecutionProvider']).prepare(ctx_id=0, det_size=(640, 640))"
+
+# ── 6. Levantar el mini-stack ────────────────────────────────────────────────
+Write-Host "== 6/7 Levantando el kiosko ==" -ForegroundColor Cyan
+docker compose -f $compose --env-file $envPath up -d
+
+# ── 7. Esperar health + primer sync del padrón ──────────────────────────────
+Write-Host "== 7/7 Esperando a que el kiosko esté listo ==" -ForegroundColor Cyan
+$ok = $false
+foreach ($i in 1..40) {
+    try {
+        if ((Invoke-RestMethod "http://localhost:8100/health" -TimeoutSec 3).status -eq "ok") { $ok = $true; break }
+    } catch {}
+    Start-Sleep -Seconds 3
+}
+if (-not $ok) { Write-Warning "El kiosko no respondió a tiempo. Revisa: docker compose -f `"$compose`" logs" }
+else {
+    Write-Host "   Bajando el padrón por primera vez..."
+    try {
+        Invoke-RestMethod -Method Post "http://localhost:8100/kiosk/roster/sync" -TimeoutSec 180 | Out-Null
+        Write-Host "   Padrón descargado."
+    } catch {
+        Write-Warning "No se pudo bajar el padrón (¿credenciales/URL?). Reintenta desde el front."
+    }
+}
+
+Write-Host ""
+Write-Host "== Instalación completa ==" -ForegroundColor Green
+Write-Host "El kiosko escucha en http://localhost:8100 (el front apunta ahí)."
+Write-Host "Para parar:   docker compose -f `"$compose`" down"
+Write-Host "Para arrancar: docker compose -f `"$compose`" up -d"
