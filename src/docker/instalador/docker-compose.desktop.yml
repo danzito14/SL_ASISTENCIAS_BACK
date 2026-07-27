@@ -1,0 +1,109 @@
+# Mini-stack BÁSICA del kiosko de escritorio (corre en la PC del cliente).
+# A diferencia del compose de dev, NO construye: hace `pull` de imágenes ya publicadas
+# en GHCR. Las URLs/credenciales de la empresa y los secretos viven en el .env que el
+# instalador genera (nunca en la imagen). El modelo buffalo_l se descarga en la
+# instalación a un volumen (ver instalar.ps1), por eso la imagen de recognition es ligera.
+#
+# Variables (las pone el instalador en el .env de al lado):
+#   REGISTRY, IMG_VERSION, KIOSK_DB_PASSWORD, RECOGNITION_INTERNAL_TOKEN,
+#   CLOUD_BASE_URL, KIOSK_USER, KIOSK_PASSWORD, KIOSK_TIPO, KIOSK_EMPRESA, KIOSK_PUERTA...
+name: kiosk
+
+services:
+  # Postgres+pgvector LOCAL (roster de UNA empresa + cola de escaneos/intentos). Solo localhost.
+  kiosk_postgres:
+    image: ${REGISTRY:-ghcr.io/danzito14}/pgvector-postgis:pg17
+    container_name: kiosk_postgres
+    restart: unless-stopped
+    command:
+      - "postgres"
+      - "-c"
+      - "shared_preload_libraries=pg_cron"
+      - "-c"
+      - "cron.database_name=SL_ASISTENCIAS"
+      - "-c"
+      - "cron.timezone=${KIOSK_TZ:-America/Mazatlan}"
+      - "-c"
+      - "TimeZone=${KIOSK_TZ:-America/Mazatlan}"
+    environment:
+      POSTGRES_USER: root
+      POSTGRES_PASSWORD: ${KIOSK_DB_PASSWORD}
+      POSTGRES_DB: SL_ASISTENCIAS
+    volumes:
+      - kiosk_pgdata:/var/lib/postgresql/data
+      # El esquema + roles se montan desde la carpeta del instalador (no van en la imagen).
+      - ./init.sql:/docker-entrypoint-initdb.d/01_init.sql:ro
+      - ./roles_microservicio.sql:/docker-entrypoint-initdb.d/02_roles.sql:ro
+    ports:
+      - "127.0.0.1:5533:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U root -d SL_ASISTENCIAS"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # Reconocimiento LOCAL (imagen LIGERA: buffalo_l NO horneado). El modelo vive en el
+  # volumen modelos_insightface (lo baja el instalador una vez → persiste entre reinicios).
+  recognition:
+    image: ${REGISTRY:-ghcr.io/danzito14}/sl-recognition:${IMG_VERSION:-1.0.0}
+    container_name: kiosk_recognition
+    restart: unless-stopped
+    environment:
+      DB_HOST: kiosk_postgres
+      DB_PORT: "5432"
+      DB_USER: root
+      DB_PASSWORD: ${KIOSK_DB_PASSWORD}
+      DB_NAME: SL_ASISTENCIAS
+      RECOGNITION_INTERNAL_TOKEN: ${RECOGNITION_INTERNAL_TOKEN}
+      PRELOAD_FACE_MODEL: "true"
+      # Anti-spoof (sí horneado, 1.7 MB). Ajustable en la instalación.
+      ANTISPOOFING_ACTIVO: ${KIOSK_ANTISPOOF:-true}
+      ANTISPOOF_UMBRAL: ${KIOSK_ANTISPOOF_UMBRAL:-0.6}
+      # Gate de calidad + umbrales (defaults de arranque; el front los afina en caliente).
+      CALIDAD_GATE_ACTIVO: ${KIOSK_CALIDAD_GATE:-true}
+      CALIDAD_DET_SCORE_MIN: ${KIOSK_CALIDAD_DET_SCORE_MIN:-0.6}
+      CALIDAD_FACE_RATIO_MIN: ${KIOSK_CALIDAD_FACE_RATIO_MIN:-0.03}
+      CALIDAD_BLUR_MIN: ${KIOSK_CALIDAD_BLUR_MIN:-40}
+      CALIDAD_BORDE_MARGEN: ${KIOSK_CALIDAD_BORDE_MARGEN:-0.01}
+      LIVENESS_MOVIMIENTO_MIN: ${KIOSK_LIVENESS_MOV_MIN:-0.004}
+      # Config en caliente (el front ajusta umbrales vía POST /kiosk/config).
+      CONFIG_RUNTIME_ACTIVO: ${KIOSK_CONFIG_RUNTIME:-true}
+      CONFIG_RUNTIME_TTL: ${KIOSK_CONFIG_RUNTIME_TTL:-15}
+    volumes:
+      - modelos_insightface:/root/.insightface   # buffalo_l descargado en la instalación
+    depends_on:
+      kiosk_postgres:
+        condition: service_healthy
+
+  # Backend LOCAL del kiosko (escucha en localhost:8100). Orquesta local→nube.
+  kiosk_local:
+    image: ${REGISTRY:-ghcr.io/danzito14}/sl-kiosk-local:${IMG_VERSION:-1.0.0}
+    container_name: kiosk_local
+    restart: unless-stopped
+    environment:
+      DB_HOST: kiosk_postgres
+      DB_PORT: "5432"
+      DB_USER: root
+      DB_PASSWORD: ${KIOSK_DB_PASSWORD}
+      DB_NAME: SL_ASISTENCIAS
+      DEBUG: "false"
+      # NUBE de la empresa (la captura el instalador; NUNCA va en la imagen).
+      CLOUD_BASE_URL: ${CLOUD_BASE_URL}
+      KIOSK_USER: ${KIOSK_USER}
+      KIOSK_PASSWORD: ${KIOSK_PASSWORD}
+      KIOSK_TIPO: ${KIOSK_TIPO:-oficina}
+      KIOSK_EMPRESA: ${KIOSK_EMPRESA:-1}
+      KIOSK_TZ: ${KIOSK_TZ:-America/Mazatlan}
+      KIOSK_PUERTA: ${KIOSK_PUERTA:-}
+      KIOSK_DISPOSITIVO: ${KIOSK_DISPOSITIVO:-}
+      RECOGNITION_URL: http://recognition:8000
+      RECOGNITION_INTERNAL_TOKEN: ${RECOGNITION_INTERNAL_TOKEN}
+    ports:
+      - "127.0.0.1:8100:8000"
+    depends_on:
+      kiosk_postgres:
+        condition: service_healthy
+
+volumes:
+  kiosk_pgdata:
+  modelos_insightface:
