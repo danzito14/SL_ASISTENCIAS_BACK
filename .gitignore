@@ -84,3 +84,13 @@ src/docker/secrets/
 *.pem
 *_ssh_key
 *_ssh_key.pub
+
+# Instalador de escritorio (Inno Setup) — artefactos GENERADOS (no versionar):
+#   · Output/ + el .exe compilado del wizard.
+#   · init.sql/roles que instalar.ps1 COPIA aquí al correr desde el repo (los
+#     originales viven en src/docker/ y sí están versionados).
+#   · el front-setup.exe que se baje, por si acaso.
+src/docker/instalador/Output/
+src/docker/instalador/*.exe
+src/docker/instalador/init.sql
+src/docker/instalador/roles_microservicio.sql
