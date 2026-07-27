@@ -9,6 +9,7 @@ import logging
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from src.core import meta
 from src.core.config import settings
 
 logger = logging.getLogger(__name__)
@@ -28,7 +29,13 @@ _PUERTA_DEFAULT = text(
 class EscaneoService:
 
     def _puerta(self, db: Session, id_puerta: int | None) -> int:
-        p = id_puerta if id_puerta is not None else settings.KIOSK_PUERTA
+        # Prioridad: la de la request → la elegida en el front (kiosk_meta) → KIOSK_PUERTA
+        # (env) → 1ª puerta activa del roster.
+        p = id_puerta
+        if p is None:
+            p = meta.puerta_actual(db)
+        if p is None:
+            p = settings.KIOSK_PUERTA
         if p is None:
             p = db.execute(_PUERTA_DEFAULT).scalar()
         if p is None:

@@ -371,3 +371,33 @@ def set_config(cambios: dict, db: Session = Depends(get_db)):
         return recognition_client.config()   # config efectiva ya con los cambios
     except Exception:
         return {"ok": True, "actualizados": list(cambios)}
+
+
+@router.get("/puertas", summary="Puertas del roster local (para el selector del front)")
+def listar_puertas(db: Session = Depends(get_db)):
+    """Lista las puertas activas de la BD local + cuál está seleccionada (kiosk_meta)."""
+    filas = db.execute(text(
+        "SELECT id_puerta, nombre_puerta FROM puertas_acceso WHERE estado = 'activo' ORDER BY id_puerta")).all()
+    return {"puertas": [{"id_puerta": f.id_puerta, "nombre_puerta": f.nombre_puerta} for f in filas],
+            "seleccionada": meta.puerta_actual(db)}
+
+
+@router.post("/puerta", summary="Fijar la puerta de fichaje de esta estación (runtime, sin reinstalar)")
+def set_puerta(body: dict, db: Session = Depends(get_db)):
+    """Guarda en kiosk_meta la puerta elegida; el fichaje la usa de inmediato."""
+    id_puerta = body.get("id_puerta")
+    if id_puerta is None:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Falta id_puerta.")
+    try:
+        id_puerta = int(id_puerta)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="id_puerta debe ser numérico.")
+    existe = db.execute(text(
+        "SELECT 1 FROM puertas_acceso WHERE id_puerta = :id AND estado = 'activo'"), {"id": id_puerta}).first()
+    if not existe:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
+                            detail="Esa puerta no existe en el roster local (baja el padrón primero).")
+    meta.escribir(db, "puerta", str(id_puerta))
+    db.commit()
+    logger.info("puerta de fichaje fijada: %s", id_puerta)
+    return {"ok": True, "id_puerta": id_puerta}

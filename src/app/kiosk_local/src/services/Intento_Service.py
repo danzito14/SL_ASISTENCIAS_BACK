@@ -9,6 +9,7 @@ import logging
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from src.core import meta
 from src.core.config import settings
 
 logger = logging.getLogger(__name__)
@@ -39,7 +40,11 @@ _PUERTA_DEFAULT = text(
 class IntentoService:
 
     def _puerta(self, db: Session, id_puerta: int | None) -> int | None:
-        p = id_puerta if id_puerta is not None else settings.KIOSK_PUERTA
+        p = id_puerta
+        if p is None:
+            p = meta.puerta_actual(db)
+        if p is None:
+            p = settings.KIOSK_PUERTA
         if p is None:
             p = db.execute(_PUERTA_DEFAULT).scalar()
         return p

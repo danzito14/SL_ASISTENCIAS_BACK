@@ -2,6 +2,7 @@
 # Micro LOCAL del kiosko de escritorio (corre en la PC, NO en la nube). Baja el roster
 # de la nube (offline_sync) a un postgres+pgvector LOCAL, reconoce offline (recognition
 # local) y sube los fichajes a la nube cuando hay internet. Independiente si se cae la red.
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -43,6 +44,15 @@ class Settings(BaseSettings):
     # ── Auto-sync (sube la cola de escaneos a la nube solo) ───────────────────
     KIOSK_SYNC_INTERVAL_SEG: float = 30.0   # cada cuánto intenta subir la cola
     KIOSK_SYNC_BATCH:        int = 500      # máx escaneos por lote de subida
+
+    @field_validator("KIOSK_EMPRESA", "KIOSK_PUERTA", "KIOSK_DISPOSITIVO", mode="before")
+    @classmethod
+    def _cadena_vacia_a_none(cls, v):
+        # Docker compose pasa "" cuando la var no está en el .env (ej. ${KIOSK_PUERTA:-}).
+        # Para estos campos int|None opcionales, "" debe ser None, no un int inválido.
+        if isinstance(v, str) and v.strip() == "":
+            return None
+        return v
 
     @property
     def DATABASE_URL(self) -> str:

@@ -10,14 +10,18 @@ param(
     [string]$KioskUser,                      # usuario del kiosko (rol escaneador)
     [string]$KioskPassword,                  # su contraseña
     [string]$Empresa,                        # id de empresa
-    [string]$Tipo    = "oficina",            # campo | oficina | empaque | mixto
-    [string]$Puerta  = "",                   # id de puerta (opcional)
+    [string]$Tipo        = "oficina",        # campo | oficina | empaque | mixto
+    [string]$Puerta      = "",               # id de puerta (int, opcional)
+    [string]$Dispositivo = "",               # id de dispositivo (int, opcional; para auditar origen)
     [string]$Registry = "ghcr.io/danzito14", # namespace de las imágenes públicas
     [string]$Version  = "1.0.0"
 )
 $ErrorActionPreference = "Stop"
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 $compose = Join-Path $here "docker-compose.desktop.yml"
+
+# Log a archivo: cuando el wizard lo corre OCULTO (sin terminal), aquí queda el detalle.
+try { Start-Transcript -Path (Join-Path $here "instalar.log") -Append -ErrorAction SilentlyContinue | Out-Null } catch {}
 
 # ── 1. Docker ────────────────────────────────────────────────────────────────
 Write-Host "== 1/7 Verificando Docker ==" -ForegroundColor Cyan
@@ -53,7 +57,7 @@ KIOSK_PASSWORD=$KioskPassword
 KIOSK_TIPO=$Tipo
 KIOSK_EMPRESA=$Empresa
 KIOSK_PUERTA=$Puerta
-KIOSK_DISPOSITIVO=$([Guid]::NewGuid().ToString("N").Substring(0,12))
+KIOSK_DISPOSITIVO=$Dispositivo
 "@
 [System.IO.File]::WriteAllText($envPath, $contenido, (New-Object System.Text.UTF8Encoding($false)))
 Write-Host "   .env creado en $envPath"
