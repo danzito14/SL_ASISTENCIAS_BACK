@@ -18,7 +18,7 @@ class Settings(BaseSettings):
     DEBUG:       bool = False
 
     # ── NUBE — de dónde baja el roster y a dónde sube los eventos ──────────────
-    # Gateway de prod (mismo que usa el APK): https://sl-asistencias.slagricola.cloud/api
+    # Gateway de la nube (mismo que usa el APK): https://<TU-DOMINIO>/api  (se define en el .env)
     # Login: POST {CLOUD_BASE_URL}/usuarios/login ; roster/subida: {CLOUD_BASE_URL}/off_sync/*
     CLOUD_BASE_URL:  str = "http://localhost:8000"
     KIOSK_USER:      str = ""          # usuario kiosko (rol escaneador) → define la EMPRESA

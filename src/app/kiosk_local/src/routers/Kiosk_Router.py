@@ -44,6 +44,41 @@ def _resp_baja_calidad(res: dict) -> dict:
             "mensaje": _PISTA_CALIDAD.get(res.get("motivo"), "Acomódate frente a la cámara.")}
 
 
+# Umbrales de recognition afinables EN CALIENTE desde el front. Se guardan en
+# parametros_sistema como 'reco.<CLAVE>' (recognition los lee con caché). El tipo valida
+# el valor entrante; la whitelist evita escribir claves arbitrarias en la tabla.
+_CONFIG_CLAVES = {
+    "CALIDAD_GATE_ACTIVO": "bool", "CALIDAD_DET_SCORE_MIN": "float",
+    "CALIDAD_FACE_RATIO_MIN": "float", "CALIDAD_BLUR_MIN": "float",
+    "CALIDAD_BORDE_MARGEN": "float", "ANTISPOOFING_ACTIVO": "bool",
+    "ANTISPOOF_UMBRAL": "float", "SIMILITUD_UMBRAL": "float",
+    "SIMILITUD_UMBRAL_ACOTADO": "float", "SPOOFING_UMBRAL": "float",
+    "LIVENESS_MIN_FRAMES_CON_ROSTRO": "int", "LIVENESS_MISMA_PERSONA_UMBRAL": "float",
+    "LIVENESS_MOVIMIENTO_MIN": "float",
+}
+_UPSERT_PARAM = text("""
+    INSERT INTO parametros_sistema (clave, valor)
+    VALUES (:clave, :valor)
+    ON CONFLICT (clave) DO UPDATE SET valor = EXCLUDED.valor, fecha_actualizacion = NOW()
+""")
+
+
+def _valor_config(clave: str, valor) -> str:
+    """Valida y normaliza el valor según el tipo de la clave; lanza ValueError si no cuadra."""
+    tipo = _CONFIG_CLAVES[clave]
+    if tipo == "bool":
+        s = str(valor).strip().lower()
+        if isinstance(valor, bool):
+            return "true" if valor else "false"
+        if s in ("1", "true", "t", "si", "sí", "yes", "y"):
+            return "true"
+        if s in ("0", "false", "f", "no", "n"):
+            return "false"
+        raise ValueError(f"{clave}: se esperaba booleano")
+    num = float(valor)   # lanza ValueError si no es número
+    return str(int(num)) if tipo == "int" else str(num)
+
+
 @router.post(
     "/roster/sync",
     summary="Bajar el roster de la nube y cargarlo en la BD LOCAL (reemplazo total)",
@@ -297,3 +332,42 @@ def estado(db: Session = Depends(get_db)):
         logger.warning("estado: %s", exc)
     out["hay_conexion"] = cloud_client.hay_conexion()
     return out
+
+
+@router.get("/config", summary="Umbrales de recognition EFECTIVOS (para calibrar en la app)")
+def get_config():
+    """Proxya el GET /config del recognition local: valores efectivos (env + overrides)."""
+    try:
+        return recognition_client.config()
+    except Exception as exc:
+        logger.error("get_config: recognition no disponible: %s", exc)
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY,
+                            detail=f"recognition no disponible: {exc}")
+
+
+@router.post(
+    "/config",
+    summary="Ajustar umbrales de recognition EN CALIENTE (sin recrear el contenedor)",
+    description="Body JSON {CLAVE: valor}. Guarda en parametros_sistema ('reco.<CLAVE>'); "
+                "recognition (2 workers) lo toma en el siguiente refresco de caché. Claves "
+                "válidas: calidad (borrosidad, etc.), anti-spoof, similitud y liveness.",
+)
+def set_config(cambios: dict, db: Session = Depends(get_db)):
+    if not cambios:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Sin cambios.")
+    desconocidas = [k for k in cambios if k not in _CONFIG_CLAVES]
+    if desconocidas:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
+                            detail=f"Claves no permitidas: {desconocidas}. Válidas: {sorted(_CONFIG_CLAVES)}")
+    try:
+        normalizados = {k: _valor_config(k, v) for k, v in cambios.items()}
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    for clave, valor in normalizados.items():
+        db.execute(_UPSERT_PARAM, {"clave": f"reco.{clave}", "valor": valor})
+    db.commit()
+    logger.info("config: %d umbral(es) actualizado(s): %s", len(cambios), list(cambios))
+    try:
+        return recognition_client.config()   # config efectiva ya con los cambios
+    except Exception:
+        return {"ok": True, "actualizados": list(cambios)}

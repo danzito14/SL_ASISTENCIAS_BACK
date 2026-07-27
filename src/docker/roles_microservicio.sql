@@ -161,6 +161,9 @@ GRANT USAGE, SELECT ON SEQUENCE
 --     queda como no-op histórico (inocuo).
 GRANT SELECT, INSERT ON escaneos TO svc_offline;
 GRANT SELECT, INSERT ON asistencia, intentos_acceso TO svc_offline;
+-- UPDATE en intentos_acceso: al subir la FOTO de evidencia offline (POST
+-- /off_sync/intentos/foto), offline_sync pone la ruta con UPDATE ... SET ruta_foto.
+GRANT UPDATE ON intentos_acceso TO svc_offline;
 GRANT EXECUTE ON FUNCTION
     validar_escaneos_lote(timestamptz),
     consolidar_asistencia_dia(integer, integer, boolean)

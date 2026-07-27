@@ -47,6 +47,13 @@ class RecognitionClient:
         r.raise_for_status()
         return r.json()
 
+    def config(self) -> dict:
+        """GET /config del recognition local: umbrales EFECTIVOS (default de env + overrides
+        en caliente de parametros_sistema). Para que el front muestre/calibre la config."""
+        r = self._client.get("/config", headers=self._headers())
+        r.raise_for_status()
+        return r.json()
+
     def disponible(self) -> bool:
         try:
             self._client.get("/health", timeout=5.0).raise_for_status()
