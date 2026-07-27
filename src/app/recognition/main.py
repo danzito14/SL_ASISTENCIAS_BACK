@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session
 
 from src.core.config import settings
 from src.core.pgdb import engine, get_db
+from src.core.runtime_config import cfg
 from src.motor import motor, LIVENESS_MIN_FRAMES_CON_ROSTRO
 
 logging.basicConfig(
@@ -99,7 +100,7 @@ def reconocer_liveness(fotos: list[UploadFile] = File(...), id_empresa: int | No
         pares = [(f, motor.detectar_y_extraer(f)) for f in frames]
         pares = [(f, c) for f, c in pares if c is not None]
         caras = [c for _, c in pares]
-        if len(caras) < LIVENESS_MIN_FRAMES_CON_ROSTRO:
+        if len(caras) < cfg.intt("LIVENESS_MIN_FRAMES_CON_ROSTRO", LIVENESS_MIN_FRAMES_CON_ROSTRO):
             return {"estado": "pocos_rostros", "n": len(caras)}
         live = motor.evaluar_liveness(caras)
         if not live["vivo"]:
@@ -156,6 +157,13 @@ def identificar(foto: UploadFile = File(...), id_empresa: int | None = Form(None
         if match is None:
             return {"reconocido": False, "det_score": cara["det_score"]}
         return {"reconocido": True, "trabajador": match, "similitud": match["similitud"], "det_score": cara["det_score"]}
+
+
+@app.get("/config", dependencies=[Depends(exigir_token_interno)], summary="Umbrales EFECTIVOS (env + overrides en caliente)")
+def config():
+    """Valores efectivos que usa el motor ahora (default de env, o el override de
+    parametros_sistema si CONFIG_RUNTIME_ACTIVO). El kiosk_local lo proxya para el front."""
+    return cfg.efectivos()
 
 
 @app.get("/health", tags=["Health"])

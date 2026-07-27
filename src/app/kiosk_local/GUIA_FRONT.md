@@ -170,7 +170,7 @@ docker compose -f docker-compose.local.yml -p kiosk down  # parar
 ### Config (`kiosk_local`, por env — ver `.env.example`)
 | Var | Para qué |
 |---|---|
-| `CLOUD_BASE_URL` | gateway de la nube (`https://sl-asistencias.slagricola.cloud/api`) |
+| `CLOUD_BASE_URL` | gateway de la nube (`https://<TU-DOMINIO>/api`) |
 | `KIOSK_USER` / `KIOSK_PASSWORD` | usuario kiosko (define la EMPRESA del roster) |
 | `KIOSK_TIPO` | campo \| oficina \| empaque \| mixto |
 | `KIOSK_EMPRESA` | empresa (opcional; el token ya la acota) |

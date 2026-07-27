@@ -18,19 +18,22 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from src.core.config import settings
+from src.core.runtime_config import cfg
 from src.antispoof import antispoof_service
 
 logger = logging.getLogger(__name__)
 
-SIMILITUD_UMBRAL = 0.5
+# Umbrales de match/liveness: ahora vienen de settings (env) para afinarlos POR SITIO
+# sin tocar código. Los defaults en config.py = estos valores históricos → prod igual.
+SIMILITUD_UMBRAL = settings.SIMILITUD_UMBRAL
 # Umbral MÁS PERMISIVO cuando la búsqueda ya está acotada por nombre a pocos
 # candidatos: al no haber con quién confundirse, se pueden atrapar matches borderline
-# (típico entre la cámara del terminal y la foto de SYS21, fuentes distintas). Tuneable.
-SIMILITUD_UMBRAL_ACOTADO = 0.40
-SPOOFING_UMBRAL = 0.5
-LIVENESS_MIN_FRAMES_CON_ROSTRO = 2
-LIVENESS_MISMA_PERSONA_UMBRAL = 0.45
-LIVENESS_MOVIMIENTO_MIN = 0.004
+# (típico entre la cámara del terminal y la foto de la nómina externa, fuentes distintas). Tuneable.
+SIMILITUD_UMBRAL_ACOTADO = settings.SIMILITUD_UMBRAL_ACOTADO
+SPOOFING_UMBRAL = settings.SPOOFING_UMBRAL
+LIVENESS_MIN_FRAMES_CON_ROSTRO = settings.LIVENESS_MIN_FRAMES_CON_ROSTRO
+LIVENESS_MISMA_PERSONA_UMBRAL = settings.LIVENESS_MISMA_PERSONA_UMBRAL
+LIVENESS_MOVIMIENTO_MIN = settings.LIVENESS_MOVIMIENTO_MIN
 # Margen alrededor de la cara al recortar (fracción del tamaño del box, por lado).
 # >0 deja cabeza/hombros/aire para que la foto del intento o incidencia se pueda
 # reutilizar (p. ej. enrolar a un 'desconocido' desde esa misma foto).
@@ -115,7 +118,7 @@ class Motor:
         raw_spoof = getattr(cara, "spoofing_score", None)
         if raw_spoof is not None:
             spoof_score = float(raw_spoof)
-            es_real = spoof_score > SPOOFING_UMBRAL
+            es_real = spoof_score > cfg.flt("SPOOFING_UMBRAL", SPOOFING_UMBRAL)
         kps = cara.kps.tolist() if getattr(cara, "kps", None) is not None else None
         bbox = cara.bbox.astype(int).tolist()
 
@@ -152,15 +155,18 @@ class Motor:
         CALIDAD_GATE_ACTIVO; cada umbral en 0 desactiva ese check (así prod/vigilancia
         no cambian salvo configuración explícita). Los motivos ('borrosa', 'cara_parcial',
         'muy_lejos', 'deteccion_debil') sirven para que el front dé una pista al usuario."""
-        if not settings.CALIDAD_GATE_ACTIVO:
+        if not cfg.boolt("CALIDAD_GATE_ACTIVO", settings.CALIDAD_GATE_ACTIVO):
             return {"ok": True, "motivo": None}
-        if settings.CALIDAD_DET_SCORE_MIN > 0 and cara["det_score"] < settings.CALIDAD_DET_SCORE_MIN:
+        det_min = cfg.flt("CALIDAD_DET_SCORE_MIN", settings.CALIDAD_DET_SCORE_MIN)
+        if det_min > 0 and cara["det_score"] < det_min:
             return {"ok": False, "motivo": "deteccion_debil"}
-        if settings.CALIDAD_FACE_RATIO_MIN > 0 and cara["face_ratio"] < settings.CALIDAD_FACE_RATIO_MIN:
+        ratio_min = cfg.flt("CALIDAD_FACE_RATIO_MIN", settings.CALIDAD_FACE_RATIO_MIN)
+        if ratio_min > 0 and cara["face_ratio"] < ratio_min:
             return {"ok": False, "motivo": "muy_lejos"}
-        if settings.CALIDAD_BORDE_MARGEN > 0 and self._cara_en_borde(cara):
+        if cfg.flt("CALIDAD_BORDE_MARGEN", settings.CALIDAD_BORDE_MARGEN) > 0 and self._cara_en_borde(cara):
             return {"ok": False, "motivo": "cara_parcial"}
-        if settings.CALIDAD_BLUR_MIN > 0 and cara["blur"] < settings.CALIDAD_BLUR_MIN:
+        blur_min = cfg.flt("CALIDAD_BLUR_MIN", settings.CALIDAD_BLUR_MIN)
+        if blur_min > 0 and cara["blur"] < blur_min:
             return {"ok": False, "motivo": "borrosa"}
         return {"ok": True, "motivo": None}
 
@@ -169,8 +175,8 @@ class Motor:
         'casi' = dentro de CALIDAD_BORDE_MARGEN * dimensión desde cada borde."""
         x1, y1, x2, y2 = cara["bbox"]
         w, h = cara["frame_w"], cara["frame_h"]
-        mx = settings.CALIDAD_BORDE_MARGEN * w
-        my = settings.CALIDAD_BORDE_MARGEN * h
+        margen = cfg.flt("CALIDAD_BORDE_MARGEN", settings.CALIDAD_BORDE_MARGEN)
+        mx, my = margen * w, margen * h
         return x1 <= mx or y1 <= my or x2 >= (w - mx) or y2 >= (h - my)
 
     def _nitidez(self, frame: np.ndarray, bbox) -> float:
@@ -186,9 +192,11 @@ class Motor:
         return float(cv2.Laplacian(gris, cv2.CV_64F).var())
 
     def _match_pgvector(self, embedding: list[float], db: Session, id_empresa, id_area,
-                        tokens: list[str], umbral: float = SIMILITUD_UMBRAL) -> dict | None:
+                        tokens: list[str], umbral: float | None = None) -> dict | None:
         """Una consulta pgvector (coseno) acotada por empresa/área y, si hay `tokens` de
         nombre, SOLO entre quienes matcheen TODOS (palabra completa, sin acentos)."""
+        if umbral is None:
+            umbral = cfg.flt("SIMILITUD_UMBRAL", SIMILITUD_UMBRAL)
         vector_str = "[" + ",".join(str(x) for x in embedding) + "]"
         params: dict = {"vector": vector_str, "id_empresa": id_empresa, "id_area": id_area}
         cond_nombre = ""
@@ -235,7 +243,7 @@ class Motor:
         if tokens:
             # Acotado por nombre → umbral más permisivo (pocos candidatos, sin confusión).
             m = self._match_pgvector(embedding, db, id_empresa, id_area, tokens,
-                                     SIMILITUD_UMBRAL_ACOTADO)
+                                     cfg.flt("SIMILITUD_UMBRAL_ACOTADO", SIMILITUD_UMBRAL_ACOTADO))
             if m is not None:
                 return m
         # Búsqueda completa (sin hint o fallback) → umbral estándar.
@@ -282,7 +290,7 @@ class Motor:
 
     def evaluar_antispoof(self, frame: np.ndarray, cara: dict) -> dict | None:
         """{ es_real, score_real } o None si desactivado/no disponible (no bloquea)."""
-        if not settings.ANTISPOOFING_ACTIVO:
+        if not cfg.boolt("ANTISPOOFING_ACTIVO", settings.ANTISPOOFING_ACTIVO):
             return None
         resultado = antispoof_service.evaluar(frame, cara["bbox"])
         if resultado is None:
@@ -296,7 +304,7 @@ class Motor:
         for i in range(len(embs)):
             for j in range(i + 1, len(embs)):
                 sim_min = min(sim_min, float(np.dot(embs[i], embs[j])))
-        if sim_min < LIVENESS_MISMA_PERSONA_UMBRAL:
+        if sim_min < cfg.flt("LIVENESS_MISMA_PERSONA_UMBRAL", LIVENESS_MISMA_PERSONA_UMBRAL):
             return {"vivo": False,
                     "motivo": f"Los frames parecen de personas distintas (similitud={sim_min:.2f}).",
                     "movimiento": 0.0, "similitud_min": sim_min}
@@ -308,7 +316,7 @@ class Motor:
             ancho = max(((a["bbox"][2] - a["bbox"][0]) + (b["bbox"][2] - b["bbox"][0])) / 2.0, 1.0)
             movimientos.append(float(np.linalg.norm(kps_a - kps_b, axis=1).mean()) / ancho)
         movimiento = max(movimientos) if movimientos else 0.0
-        if movimiento < LIVENESS_MOVIMIENTO_MIN:
+        if movimiento < cfg.flt("LIVENESS_MOVIMIENTO_MIN", LIVENESS_MOVIMIENTO_MIN):
             return {"vivo": False,
                     "motivo": f"Sin movimiento entre frames (posible foto estática, mov={movimiento:.4f}).",
                     "movimiento": movimiento, "similitud_min": sim_min}

@@ -106,6 +106,19 @@ services:
       CALIDAD_FACE_RATIO_MIN: ${KIOSK_CALIDAD_FACE_RATIO_MIN:-0.03} # área cara / área imagen
       CALIDAD_BLUR_MIN: ${KIOSK_CALIDAD_BLUR_MIN:-40}              # varianza Laplaciano (nitidez)
       CALIDAD_BORDE_MARGEN: ${KIOSK_CALIDAD_BORDE_MARGEN:-0.01}    # fracción del borde → cara parcial
+      # ── Umbrales de MATCH y LIVENESS (afinables por sitio) ── default = valor del motor.
+      # Súbelos/bájalos según la cámara/iluminación de ESTE kiosko. Cambio = editar y
+      # 'docker compose ... up -d recognition' (~30s). Ver comentarios en config.py/motor.py.
+      SIMILITUD_UMBRAL: ${KIOSK_SIMILITUD_UMBRAL:-0.5}                  # match: mayor = más estricto
+      SIMILITUD_UMBRAL_ACOTADO: ${KIOSK_SIMILITUD_UMBRAL_ACOTADO:-0.40} # match acotado por nombre
+      SPOOFING_UMBRAL: ${KIOSK_SPOOFING_UMBRAL:-0.5}                    # score de realidad mínimo
+      LIVENESS_MOVIMIENTO_MIN: ${KIOSK_LIVENESS_MOV_MIN:-0.004}         # menos movimiento = foto → no_vivo (súbelo si pasan fotos)
+      LIVENESS_MISMA_PERSONA_UMBRAL: ${KIOSK_LIVENESS_SIM_MIN:-0.45}    # similitud entre frames (misma persona)
+      LIVENESS_MIN_FRAMES_CON_ROSTRO: ${KIOSK_LIVENESS_MIN_FRAMES:-2}   # frames con rostro mínimos
+      # Config EN CALIENTE: recognition local lee overrides de parametros_sistema (los
+      # escribe el front vía POST /kiosk/config). Los env de arriba quedan como DEFAULT.
+      CONFIG_RUNTIME_ACTIVO: ${KIOSK_CONFIG_RUNTIME:-true}
+      CONFIG_RUNTIME_TTL: ${KIOSK_CONFIG_RUNTIME_TTL:-15}
     depends_on:
       kiosk_postgres:
         condition: service_healthy

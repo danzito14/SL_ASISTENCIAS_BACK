@@ -14,6 +14,7 @@ import numpy as np
 import onnxruntime as ort
 
 from src.core.config import settings
+from src.core.runtime_config import cfg
 
 logger = logging.getLogger(__name__)
 
@@ -120,7 +121,8 @@ class AntiSpoofService:
         label = int(np.argmax(suma))
         idx = self._real_index if self._real_index < len(suma) else 0
         score_real = float(suma[idx])
-        es_real = (label == idx) and (score_real >= self._umbral)
+        umbral = cfg.flt("ANTISPOOF_UMBRAL", self._umbral)   # override en caliente (o env)
+        es_real = (label == idx) and (score_real >= umbral)
         logger.info("Anti-spoof: probs=%s label=%d real_idx=%d score_real=%.4f es_real=%s",
                     np.round(suma, 4).tolist(), label, idx, score_real, es_real)
         return {"es_real": es_real, "label": label, "score_real": score_real, "probs": suma.tolist()}
