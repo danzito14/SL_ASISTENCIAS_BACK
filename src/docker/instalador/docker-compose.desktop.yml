@@ -56,11 +56,13 @@ services:
       DB_NAME: SL_ASISTENCIAS
       RECOGNITION_INTERNAL_TOKEN: ${RECOGNITION_INTERNAL_TOKEN}
       PRELOAD_FACE_MODEL: "true"
-      # Anti-spoof (sí horneado, 1.7 MB). Ajustable en la instalación.
+      # Anti-spoof PASIVO ON (igual que la web): funciona porque el front manda el frame
+      # COMPLETO → MiniFASNet obtiene su contexto 2.7×. Con recortes daba falso spoof.
       ANTISPOOFING_ACTIVO: ${KIOSK_ANTISPOOF:-true}
       ANTISPOOF_UMBRAL: ${KIOSK_ANTISPOOF_UMBRAL:-0.6}
-      # Gate de calidad + umbrales (defaults de arranque; el front los afina en caliente).
-      CALIDAD_GATE_ACTIVO: ${KIOSK_CALIDAD_GATE:-true}
+      # Gate de calidad OFF por default (como la nube), para no rechazar planos generales
+      # de webcam. Se puede activar por sitio desde el panel de calibración si hace falta.
+      CALIDAD_GATE_ACTIVO: ${KIOSK_CALIDAD_GATE:-false}
       CALIDAD_DET_SCORE_MIN: ${KIOSK_CALIDAD_DET_SCORE_MIN:-0.6}
       CALIDAD_FACE_RATIO_MIN: ${KIOSK_CALIDAD_FACE_RATIO_MIN:-0.03}
       CALIDAD_BLUR_MIN: ${KIOSK_CALIDAD_BLUR_MIN:-40}

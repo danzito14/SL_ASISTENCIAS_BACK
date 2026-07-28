@@ -104,7 +104,9 @@ def sync_roster(
         cloud_client.set_token(token)
         meta.escribir(db, "cloud_token", token)
         db.commit()
-        id_empresa = None  # la empresa la define el token (server-side), no un id fijo
+        # NO reseteo id_empresa: un usuario normal → el server usa la empresa de SU token
+        # (ignora este id); un admin (empresa comodín) → cae a KIOSK_EMPRESA como respaldo,
+        # evitando el 400 "indica una empresa concreta".
     try:
         # Descarga PRIMERO (fuera de la transacción de carga): si falla, se aborta ANTES
         # de tocar/vaciar el padrón local → la estación sigue con sus datos previos.
