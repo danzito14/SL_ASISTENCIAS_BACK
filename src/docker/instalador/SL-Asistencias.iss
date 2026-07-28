@@ -16,7 +16,7 @@
 ; Namespace de las imagenes publicas en GHCR (debe coincidir con lo publicado):
 #define Registry   "ghcr.io/danzito14"
 ; URL del instalador del FRONT (Electron, GitHub Release). Vacio = se omite el paso.
-#define FrontUrl   "https://github.com/danzito14/FP_ESCANER_FRONT/releases/download/Desktop/SL-Asistencias-Estacion-0.2.4-setup.exe"
+#define FrontUrl   "https://github.com/danzito14/FP_ESCANER_FRONT/releases/download/Update-Desktop/SL-Asistencias-Estacion-0.2.4-setup.exe"
 
 [Setup]
 AppName={#AppName}
@@ -44,6 +44,7 @@ Source: "..\roles_microservicio.sql"; DestDir: "{app}"; Flags: ignoreversion
 [Code]
 var
   DatosPage: TInputQueryWizardPage;
+  LogMemo: TNewMemo;
 
 // ── Detección de Docker (no instala; solo verifica que responda) ──────────────
 function DockerDisponible(): Boolean;
@@ -79,6 +80,18 @@ begin
   DatosPage.Add('ID de empresa:', False);
   DatosPage.Add('Tipo (campo | oficina | empaque | mixto):', False);
   DatosPage.Values[4] := 'oficina';
+
+  // Cuadro de LOGS bajo la barra de progreso (se llena en vivo durante la instalación).
+  LogMemo := TNewMemo.Create(WizardForm);
+  LogMemo.Parent := WizardForm.InstallingPage;
+  LogMemo.Left := WizardForm.ProgressGauge.Left;
+  LogMemo.Top := WizardForm.ProgressGauge.Top + WizardForm.ProgressGauge.Height + ScaleY(8);
+  LogMemo.Width := WizardForm.ProgressGauge.Width;
+  LogMemo.Height := ScaleY(170);
+  LogMemo.ScrollBars := ssVertical;
+  LogMemo.ReadOnly := True;
+  LogMemo.Font.Name := 'Consolas';
+  LogMemo.Visible := False;
 end;
 
 function NextButtonClick(CurPageID: Integer): Boolean;
@@ -98,8 +111,9 @@ end;
 // ── Ejecuta el motor (instalar.ps1) tras copiar los archivos ─────────────────
 procedure CurStepChanged(CurStep: TSetupStep);
 var
-  Code: Integer;
+  Code, Tries: Integer;
   Tipo, Params: String;
+  MarkerText: AnsiString;
 begin
   if CurStep = ssPostInstall then
   begin
@@ -109,7 +123,10 @@ begin
     Tipo := Trim(DatosPage.Values[4]);
     if Tipo = '' then Tipo := 'oficina';
     WizardForm.StatusLabel.Caption :=
-      'Configurando el backend (Docker, imágenes, modelo y arranque). Puede tardar varios minutos...';
+      'Configurando el backend (Docker, imágenes, modelo). Puede tardar varios minutos...';
+    LogMemo.Visible := True;
+    LogMemo.Text := '';
+    DeleteFile(ExpandConstant('{app}\instalar.done'));
     Params :=
       '-NoProfile -ExecutionPolicy Bypass -File "' + ExpandConstant('{app}\instalar.ps1') + '"' +
       ' -CloudUrl "'      + Trim(DatosPage.Values[0]) + '"' +
@@ -118,12 +135,31 @@ begin
       ' -Empresa "'       + Trim(DatosPage.Values[3]) + '"' +
       ' -Tipo "'          + Tipo                       + '"' +
       ' -Registry "{#Registry}" -Version "{#AppVersion}"';
-    // SW_HIDE: sin ventana de PowerShell. El detalle queda en {app}\instalar.log.
-    if not Exec('powershell.exe', Params, ExpandConstant('{app}'), SW_HIDE, ewWaitUntilTerminated, Code) then
+    // ewNoWait: corre OCULTO y SIN bloquear, para volcar el log en el memo mientras avanza.
+    if not Exec('powershell.exe', Params, ExpandConstant('{app}'), SW_HIDE, ewNoWait, Code) then
       MsgBox('No se pudo iniciar la configuración del backend (PowerShell).', mbError, MB_OK)
-    else if Code <> 0 then
-      MsgBox('La configuración del backend terminó con avisos (código ' + IntToStr(Code) + ').' + #13#10 +
-             'Detalle en: ' + ExpandConstant('{app}\instalar.log'), mbInformation, MB_OK);
+    else
+    begin
+      Tries := 0;
+      // Sondea el marcador de fin; entretanto refresca el log bajo la barra (~cada 0.5 s).
+      while (not FileExists(ExpandConstant('{app}\instalar.done'))) and (Tries < 3600) do
+      begin
+        Sleep(500);
+        Tries := Tries + 1;
+        if FileExists(ExpandConstant('{app}\instalar.log')) then
+          try
+            LogMemo.Lines.LoadFromFile(ExpandConstant('{app}\instalar.log'));
+            LogMemo.Update;
+          except
+          end;
+      end;
+      try LogMemo.Lines.LoadFromFile(ExpandConstant('{app}\instalar.log')); except end;
+      MarkerText := '';
+      LoadStringFromFile(ExpandConstant('{app}\instalar.done'), MarkerText);
+      if Pos('ERROR', MarkerText) = 1 then
+        MsgBox('La configuración del backend falló:' + #13#10 + String(MarkerText) + #13#10 + #13#10 +
+               'Detalle en: ' + ExpandConstant('{app}\instalar.log'), mbError, MB_OK);
+    end;
 
     // ── PASO DEL FRONT (Electron) — activo porque #define FrontUrl no está vacío ──
     // Descarga el instalador del front, le quita la "marca de internet" (para que

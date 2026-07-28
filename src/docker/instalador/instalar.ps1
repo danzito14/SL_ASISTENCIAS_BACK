@@ -20,8 +20,15 @@ $ErrorActionPreference = "Stop"
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 $compose = Join-Path $here "docker-compose.desktop.yml"
 
-# Log a archivo: cuando el wizard lo corre OCULTO (sin terminal), aquí queda el detalle.
+# Log a archivo: el wizard lo LEE en vivo y lo muestra bajo la barra (corre oculto).
 try { Start-Transcript -Path (Join-Path $here "instalar.log") -Append -ErrorAction SilentlyContinue | Out-Null } catch {}
+
+# Marcador de fin: el wizard corre este script sin esperar (ewNoWait) y sondea este
+# archivo para saber cuándo terminó. El trap lo escribe también si algo falla, para que
+# el wizard no se quede colgado esperando.
+$marcador = Join-Path $here "instalar.done"
+Remove-Item $marcador -ErrorAction SilentlyContinue
+trap { "ERROR: $($_.Exception.Message)" | Out-File -FilePath $marcador -Encoding ascii; exit 1 }
 
 # ── 1. Docker ────────────────────────────────────────────────────────────────
 Write-Host "== 1/7 Verificando Docker ==" -ForegroundColor Cyan
@@ -107,3 +114,6 @@ Write-Host "== Instalación completa ==" -ForegroundColor Green
 Write-Host "El kiosko escucha en http://localhost:8100 (el front apunta ahí)."
 Write-Host "Para parar:   docker compose -f `"$compose`" down"
 Write-Host "Para arrancar: docker compose -f `"$compose`" up -d"
+
+# Fin OK: el wizard lo detecta y cierra la fase.
+"OK" | Out-File -FilePath $marcador -Encoding ascii
