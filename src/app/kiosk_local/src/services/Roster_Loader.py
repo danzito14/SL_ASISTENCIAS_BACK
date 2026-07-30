@@ -55,6 +55,18 @@ _UP_PUERTA = text("""
         nombre_puerta = EXCLUDED.nombre_puerta, tipo_puerta = EXCLUDED.tipo_puerta,
         id_area = EXCLUDED.id_area, id_empresa = EXCLUDED.id_empresa
 """)
+# Terminales/estaciones. Sin esto, un escaneo con id_dispositivo reventaba por la FK y el
+# back respondía "Dispositivo N no encontrado" en toda la estación. Se insertan DESPUÉS de
+# las áreas (FK id_area) y no se borran nunca: 'escaneos.id_dispositivo' los referencia.
+_UP_DISPOSITIVO = text("""
+    INSERT INTO dispositivos (id_dispositivo, nombre_dispositivo, tipo_dispositivo,
+                              id_area, id_empresa, estado)
+    VALUES (:id, :nombre, CAST(:tipo AS tipo_dispositivo), :area, :empresa, 'activo')
+    ON CONFLICT (id_dispositivo) DO UPDATE SET
+        nombre_dispositivo = EXCLUDED.nombre_dispositivo,
+        tipo_dispositivo = EXCLUDED.tipo_dispositivo,
+        id_area = EXCLUDED.id_area, id_empresa = EXCLUDED.id_empresa, estado = 'activo'
+""")
 _UP_TRAB = text("""
     INSERT INTO trabajadores (id_trabajador, id_emp, origen_nomina, nombre, apellido,
                               id_area, id_empresa, permiso_escaneo, estado)
@@ -98,6 +110,13 @@ class RosterLoader:
             db.execute(_UP_PUERTA, {"id": p["id_puerta"], "nombre": p["nombre_puerta"],
                                     "tipo": p.get("tipo_puerta") or "campo",
                                     "area": p.get("id_area"), "empresa": empresa})
+        # .get con default: una nube anterior a este cambio no manda 'dispositivos' y la
+        # estación tiene que seguir cargando el roster igual.
+        for d in roster.get("dispositivos", []):
+            db.execute(_UP_DISPOSITIVO, {"id": d["id_dispositivo"], "nombre": d["nombre_dispositivo"],
+                                         # El enum solo admite escaner_facial|huella|escaner_qr.
+                                         "tipo": d.get("tipo_dispositivo") or "escaner_facial",
+                                         "area": d.get("id_area"), "empresa": empresa})
 
         n_trab = n_emb = 0
         for t in roster.get("trabajadores", []):
@@ -122,7 +141,8 @@ class RosterLoader:
         res = {"empresa": empresa, "tipo": roster.get("tipo"),
                "roster_version": roster.get("roster_version"),
                "trabajadores": n_trab, "embeddings": n_emb,
-               "areas": len(roster.get("areas", [])), "puertas": len(roster.get("puertas", []))}
+               "areas": len(roster.get("areas", [])), "puertas": len(roster.get("puertas", [])),
+               "dispositivos": len(roster.get("dispositivos", []))}
         logger.info("roster cargado en BD local: %s", res)
         return res
 

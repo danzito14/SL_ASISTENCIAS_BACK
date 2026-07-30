@@ -48,6 +48,16 @@ class Settings(BaseSettings):
     RECOGNITION_SERVICE_URL: str = "http://recognition:8000"
     RECOGNITION_INTERNAL_TOKEN: str = os.getenv("RECOGNITION_INTERNAL_TOKEN", "")
 
+    # ── MODO KIOSKO (estación de escritorio, local-first) ────────────────────────
+    # Cuando es True, este backend corre EN LA PC del cliente contra la BD local, y el
+    # escáner deja de ser la fuente de verdad: encola el escaneo (sincronizado_en NULL,
+    # que es la marca de "pendiente" que lee el loop de subida de kiosk_local) y NO
+    # consolida asistencia ni guarda fotos por 'media' — de eso se encarga la nube al
+    # recibir la cola (/off_sync/asistencias es idempotente). DEFAULT False: prod NO
+    # cambia. Consolidar también aquí daría dos verdades; guardar fotos sin 'media' en
+    # la estación solo agrega timeouts al fichaje.
+    MODO_KIOSKO: bool = False
+
     # Reconocimiento facial
     PRELOAD_FACE_MODEL: bool = False  # Si True, carga buffalo_l al arrancar
 

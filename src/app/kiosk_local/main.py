@@ -15,6 +15,7 @@ from src.core import meta
 from src.core.config import settings
 from src.core.pgdb import SessionLocal, engine
 from src.routers.Kiosk_Router import router as Router_Kiosk
+from src.routers.Scanner_Proxy_Router import cerrar_cliente, router as Router_Scanner
 from src.services.Cloud_Client import cloud_client
 from src.services.Sync_Service import sync_service
 
@@ -68,6 +69,7 @@ async def lifespan(app: FastAPI):
     finally:
         stop.set()
         hilo.join(timeout=5)
+        await cerrar_cliente()
 
 
 app = FastAPI(title=settings.APP_TITLE, version=settings.APP_VERSION, debug=settings.DEBUG, lifespan=lifespan)
@@ -80,6 +82,9 @@ app.add_middleware(
 )
 
 app.include_router(Router_Kiosk)
+# Escáner con el contrato de la NUBE (/scanner/*), resuelto por el back local. Mismas
+# rutas online y offline; /kiosk/acceso e /kiosk/identificar quedan solo por compatibilidad.
+app.include_router(Router_Scanner)
 
 
 @app.get("/health", tags=["Health"])

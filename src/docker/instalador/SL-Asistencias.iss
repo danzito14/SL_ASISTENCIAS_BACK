@@ -11,12 +11,18 @@
 ;   · (Opcional, cuando el front esté listo) descarga/instala el Electron + autostart.
 
 #define AppName    "SL Asistencias - Kiosko"
-#define AppVersion "1.0.0"
+; Version del INSTALADOR: subela en CADA build (aunque solo cambie el compose o el .ps1).
+; Va en el nombre del .exe, asi distingues que build tiene cada estacion.
+#define AppVersion "1.1.2"
+; Tag de las IMAGENES en GHCR: subelo SOLO cuando republiques imagenes con
+; publicar-imagenes.ps1 -Version <tag>. Si pones un tag no publicado, el pull falla.
+; Va aparte de AppVersion a proposito: cambios de compose/instalador NO tocan imagenes.
+#define ImgVersion "1.0.2"
 #define Publisher  "SL Agricola"
 ; Namespace de las imagenes publicas en GHCR (debe coincidir con lo publicado):
 #define Registry   "ghcr.io/danzito14"
 ; URL del instalador del FRONT (Electron, GitHub Release). Vacio = se omite el paso.
-#define FrontUrl   "https://github.com/danzito14/FP_ESCANER_FRONT/releases/download/Update-Desktop/SL-Asistencias-Estacion-0.2.4-setup.exe"
+#define FrontUrl   "https://github.com/danzito14/FP_ESCANER_FRONT/releases/download/0.2.6/SL-Asistencias-Estacion-0.2.6-setup.exe"
 
 [Setup]
 AppName={#AppName}
@@ -24,7 +30,7 @@ AppVersion={#AppVersion}
 AppPublisher={#Publisher}
 DefaultDirName={autopf}\SL Asistencias
 DefaultGroupName=SL Asistencias
-OutputBaseFilename=SL-Asistencias-Instalador
+OutputBaseFilename=SL-Asistencias-Instalador-{#AppVersion}
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
@@ -134,7 +140,7 @@ begin
       ' -KioskPassword "' + DatosPage.Values[2]       + '"' +
       ' -Empresa "'       + Trim(DatosPage.Values[3]) + '"' +
       ' -Tipo "'          + Tipo                       + '"' +
-      ' -Registry "{#Registry}" -Version "{#AppVersion}"';
+      ' -Registry "{#Registry}" -Version "{#ImgVersion}"';
     // ewNoWait: corre OCULTO y SIN bloquear, para volcar el log en el memo mientras avanza.
     if not Exec('powershell.exe', Params, ExpandConstant('{app}'), SW_HIDE, ewNoWait, Code) then
       MsgBox('No se pudo iniciar la configuración del backend (PowerShell).', mbError, MB_OK)

@@ -42,6 +42,12 @@ class EscaneoService:
             raise ValueError("no hay puerta en el roster local; baja el roster primero.")
         return p
 
+    def puerta_estacion(self, db: Session, id_puerta: int | None = None) -> int:
+        """Puerta EFECTIVA de esta estación. Pública porque el proxy de /scanner/* la
+        necesita: en la nube `id_puerta` es un query param obligatorio, y aquí el front
+        no tiene por qué saberlo (la estación ya sabe en qué puerta está)."""
+        return self._puerta(db, id_puerta)
+
     def registrar_local(self, db: Session, id_trabajador: int, similitud: float | None,
                         id_puerta: int | None = None, tipo_registro: str = "entrada",
                         id_empresa: int | None = None) -> str:

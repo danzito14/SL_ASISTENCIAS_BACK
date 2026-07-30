@@ -31,6 +31,16 @@ class RosterPuerta(BaseModel):
     id_area: int | None = None
 
 
+class RosterDispositivo(BaseModel):
+    """Terminal/estación desde la que se ficha. Va en el roster porque el escaneo lleva
+    id_dispositivo con FK: sin este catálogo en local, la estación no puede sellar el
+    fichaje con el equipo de origen. NO se mandan ip/puerto: offline no sirven de nada."""
+    id_dispositivo: int
+    nombre_dispositivo: str
+    tipo_dispositivo: str
+    id_area: int | None = None
+
+
 class RosterResponse(BaseModel):
     empresa: int
     tipo: str
@@ -40,3 +50,6 @@ class RosterResponse(BaseModel):
     trabajadores: list[RosterTrabajador]
     areas: list[RosterArea]
     puertas: list[RosterPuerta]
+    # Default [] a propósito: un cliente viejo (APK) que no lo espera lo ignora, y uno
+    # nuevo contra una nube vieja no rompe. Añadir campos al roster es compatible.
+    dispositivos: list[RosterDispositivo] = []
