@@ -21,7 +21,7 @@ VERSION="${1:-1.1.2}"; shift || true
 # .deb de la app (Electron) que el .run descargará e instalará. Cumple el mismo papel que
 # el '#define FrontUrl' del .iss en Windows: actualízalo en CADA release del front, porque
 # el escáner offline solo funciona con un front que traiga el cambio de scannerUrl.
-FRONT_URL="https://github.com/danzito14/FP_ESCANER_FRONT/releases/download/0.2.6_Linux_version/SL-Asistencias-Estacion-0.2.6.deb"
+FRONT_URL="https://github.com/danzito14/FP_ESCANER_FRONT/releases/download/0.2.7_Linux/SL-Asistencias-Estacion-0.2.7.deb"
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --front-url) FRONT_URL="$2"; shift 2 ;;

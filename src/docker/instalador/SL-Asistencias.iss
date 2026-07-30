@@ -22,7 +22,7 @@
 ; Namespace de las imagenes publicas en GHCR (debe coincidir con lo publicado):
 #define Registry   "ghcr.io/danzito14"
 ; URL del instalador del FRONT (Electron, GitHub Release). Vacio = se omite el paso.
-#define FrontUrl   "https://github.com/danzito14/FP_ESCANER_FRONT/releases/download/0.2.6/SL-Asistencias-Estacion-0.2.6-setup.exe"
+#define FrontUrl   "https://github.com/danzito14/FP_ESCANER_FRONT/releases/download/0.2.7_Windows/SL-Asistencias-Estacion-0.2.7-setup.exe"
 
 [Setup]
 AppName={#AppName}
