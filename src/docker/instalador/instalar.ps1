@@ -14,7 +14,7 @@ param(
     [string]$Puerta      = "",               # id de puerta (int, opcional)
     [string]$Dispositivo = "",               # id de dispositivo (int, opcional; para auditar origen)
     [string]$Registry = "ghcr.io/danzito14", # namespace de las imágenes públicas
-    [string]$Version  = "1.0.0"
+    [string]$Version  = "1.0.2"
 )
 $ErrorActionPreference = "Stop"
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -52,12 +52,45 @@ if (-not $Empresa)       { $Empresa = Read-Host "ID de empresa" }
 Write-Host "== 3/7 Generando secretos y .env ==" -ForegroundColor Cyan
 function New-Secret { -join ((48..57)+(65..90)+(97..122) | Get-Random -Count 40 | ForEach-Object {[char]$_}) }
 $envPath = Join-Path $here ".env"
+
+# El volumen de datos SOBREVIVE a desinstalar la app y a borrar las imágenes: Windows no
+# ejecuta Docker al desinstalar. Si ya existe, Postgres conserva la contraseña con la que
+# se INICIALIZÓ y ninguna nueva tendrá efecto (POSTGRES_PASSWORD solo aplica en un volumen
+# vacío). Reinstalar generando secretos nuevos dejaba todo el stack con
+# "password authentication failed for user root". Por eso: si hay volumen previo, se
+# REUSAN los secretos del .env anterior y, si ese .env ya no está, se realinea el rol
+# más abajo (paso 6) por el socket local, que en la imagen oficial es 'trust'.
+$volumenDatos = "kiosk_kiosk_pgdata"
+$volumenContenedor = "kiosk_postgres"
+$volumenPrevio = [bool](docker volume ls -q --filter "name=^$volumenDatos$")
+
+function Get-EnvValor([string]$ruta, [string]$clave) {
+    if (-not (Test-Path $ruta)) { return $null }
+    $m = Select-String -Path $ruta -Pattern "^$clave=(.*)$" | Select-Object -First 1
+    if ($m) { return $m.Matches[0].Groups[1].Value }
+    return $null
+}
+function Get-SecretoReusable([string]$clave) {
+    if ($volumenPrevio) {
+        $previo = Get-EnvValor $envPath $clave
+        if ($previo) { return $previo }
+    }
+    return (New-Secret)
+}
+
+$dbPassword     = Get-SecretoReusable "KIOSK_DB_PASSWORD"
+$dbPasswordNueva = $volumenPrevio -and ((Get-EnvValor $envPath "KIOSK_DB_PASSWORD") -ne $dbPassword)
+if ($volumenPrevio) {
+    Write-Host "   Detectado un volumen de datos previo ($volumenDatos): se conserva la BD."
+}
+
 $contenido = @"
 # Generado por instalar.ps1 — NO subir a git. Contiene secretos de ESTA estación.
 REGISTRY=$Registry
 IMG_VERSION=$Version
-KIOSK_DB_PASSWORD=$(New-Secret)
-RECOGNITION_INTERNAL_TOKEN=$(New-Secret)
+KIOSK_DB_PASSWORD=$dbPassword
+RECOGNITION_INTERNAL_TOKEN=$(Get-SecretoReusable "RECOGNITION_INTERNAL_TOKEN")
+KIOSK_GATEWAY_TOKEN=$(Get-SecretoReusable "KIOSK_GATEWAY_TOKEN")
 CLOUD_BASE_URL=$CloudUrl
 KIOSK_USER=$KioskUser
 KIOSK_PASSWORD=$KioskPassword
@@ -87,6 +120,28 @@ docker run --rm -v kiosk_modelos_insightface:/root/.insightface "$Registry/sl-re
 
 # ── 6. Levantar el mini-stack ────────────────────────────────────────────────
 Write-Host "== 6/7 Levantando el kiosko ==" -ForegroundColor Cyan
+# Postgres primero: si el volumen venía de una instalación anterior cuyo .env ya no está,
+# su rol 'root' tiene la contraseña vieja y hay que realinearla ANTES de levantar el resto.
+docker compose -f $compose --env-file $envPath up -d kiosk_postgres
+if ($dbPasswordNueva) {
+    Write-Host "   Realineando la contraseña de la BD heredada..."
+    $listo = $false
+    foreach ($i in 1..30) {
+        docker exec $volumenContenedor pg_isready -U root -d SL_ASISTENCIAS *> $null
+        if ($?) { $listo = $true; break }
+        Start-Sleep -Milliseconds 700
+    }
+    if ($listo) {
+        # Por el socket local la imagen oficial autentica con 'trust', así que esto
+        # funciona sin conocer la contraseña anterior.
+        docker exec $volumenContenedor psql -U root -d SL_ASISTENCIAS `
+            -c "ALTER USER root WITH PASSWORD '$dbPassword';" *> $null
+        if ($?) { Write-Host "   Contraseña de la BD realineada." }
+        else { Write-Warning "No se pudo realinear la contraseña de la BD; revisa los logs de $volumenContenedor." }
+    } else {
+        Write-Warning "Postgres no aceptó conexiones a tiempo; no se pudo realinear la contraseña."
+    }
+}
 docker compose -f $compose --env-file $envPath up -d
 
 # ── 7. Esperar health + primer sync del padrón ──────────────────────────────

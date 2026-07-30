@@ -68,6 +68,39 @@ el front pega a `localhost:8100` y el backend decide si responde local o hace fa
 
 Sin auth (es local, solo escucha en localhost). Todas las respuestas son JSON.
 
+### ⭐ Escáner: `POST /scanner/*` — las MISMAS rutas que la nube
+
+El escáner ya no tiene un contrato propio. La estación levanta el **mismo `back` de la
+nube** (con `MODO_KIOSKO=true`, contra la BD local) y `kiosk_local` le reenvía `/scanner/*`
+haciendo de gateway. Para el front eso significa **un solo cliente**: mismas rutas, mismos
+parámetros y el mismo `ScanResponse`, cambie o no el host.
+
+| Ruta | Igual que en la nube |
+|---|---|
+| `POST /scanner/identificar/foto` (multipart `foto`) | sí — dice quién es, no registra |
+| `POST /scanner/acceso/foto` (multipart `foto`) | sí — ficha |
+| `POST /scanner/acceso/liveness` (multipart `fotos`, 3-5) | sí — ficha con prueba de vida |
+
+Única diferencia a favor: **`id_puerta` es opcional**. En la nube es obligatorio; aquí, si
+no lo mandas, se usa la puerta de la estación (la elegida en el front → `KIOSK_PUERTA` →
+1ª del roster). Si la mandas, manda la tuya.
+
+```json
+{"acceso":true,"mensaje":"Acceso concedido — URIEL ALONSO CARO DIAZ (similitud: 61.10%).",
+ "trabajador":{"id_trabajador":684,"nombre":"URIEL ALONSO","apellido":"CARO DIAZ","estado":"activo"},
+ "id_escaneo":"019f527f-9e8a-766b-...","estado_registro":"exitoso"}
+```
+
+Diferencias de comportamiento respecto a la nube, a tener presentes:
+
+- **No consolida**: la estación encola el escaneo y la nube deriva entrada/salida al
+  recibir la cola. Offline no esperes que la respuesta diga "ya fichaste hoy".
+- **Sin fallback por default**: si el rostro no está en el roster local, responde "no
+  reconocido" sin ir a la nube. Se enciende con `KIOSK_SCANNER_FALLBACK_NUBE=true`, pero
+  mete latencia de red en el fichaje; lo correcto es sincronizar el roster tras enrolar.
+- `POST /kiosk/acceso` y `POST /kiosk/identificar` siguen existiendo **solo por
+  compatibilidad**. Para código nuevo usa `/scanner/*`.
+
 ### `POST /kiosk/roster/sync?tipo=oficina`
 Baja el roster de la nube y lo carga en la BD local. `tipo` opcional (default `KIOSK_TIPO`).
 ```json
@@ -161,10 +194,12 @@ Fuerza subir YA la cola a la nube (además del loop automático cada 30s).
 ```bash
 cd src/docker
 # Nube = gateway (dev: http://host.docker.internal:8005 ; prod: https://.../api)
-docker compose -f docker-compose.local.yml -p kiosk up -d --build
+# SIN -p: el proyecto se llama 'kiosk_dev' (ver el compose). Pasar -p kiosk lo haría
+# chocar con una instalación real en la misma PC (mismos contenedores y volumen).
+docker compose -f docker-compose.local.yml up -d --build
 curl -X POST http://localhost:8100/kiosk/roster/sync      # baja el roster
-curl -X POST http://localhost:8100/kiosk/acceso -F "foto=@cara.jpg"   # ficha
-docker compose -f docker-compose.local.yml -p kiosk down  # parar
+curl -X POST "http://localhost:8100/scanner/acceso/foto" -F "foto=@cara.jpg"   # ficha
+docker compose -f docker-compose.local.yml down            # parar
 ```
 
 ### Config (`kiosk_local`, por env — ver `.env.example`)

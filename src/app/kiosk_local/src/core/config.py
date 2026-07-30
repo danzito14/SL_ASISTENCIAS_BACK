@@ -35,6 +35,25 @@ class Settings(BaseSettings):
     RECOGNITION_INTERNAL_TOKEN: str = ""
     RECOGNITION_TIMEOUT:        float = 30.0
 
+    # ── Back LOCAL (el MISMO código de la nube, con MODO_KIOSKO=true) ──────────
+    # El escáner del kiosko ya no es una implementación aparte: kiosk_local expone
+    # /scanner/* (contrato idéntico al de la nube) y lo reenvía a este back local, que
+    # corre contra la BD de la estación. kiosk_local hace de GATEWAY: el back confía en
+    # los headers X-* (igual que en prod confía en Traefik+ForwardAuth), y BACKEND_GATEWAY_TOKEN
+    # prueba que la petición vino de aquí y no de alguien hablándole directo al contenedor.
+    BACKEND_LOCAL_URL:     str = "http://backend:8000"
+    BACKEND_TIMEOUT:       float = 30.0
+    BACKEND_GATEWAY_TOKEN: str = ""
+
+    # Fallback a la nube cuando el back local NO reconoce: se busca contra TODA la empresa
+    # (útil con alguien enrolado después del último sync del roster). ON, pero ya no cuesta
+    # lo que costaba: antes cada frame no reconocido pagaba un sondeo de red de hasta 5 s
+    # AUNQUE no hubiera internet; ahora ese estado va cacheado (KIOSK_CONEXION_TTL_SEG), así
+    # que sin conexión el fallback se salta sin bloquear el fichaje.
+    KIOSK_SCANNER_FALLBACK_NUBE: bool = True
+    # TTL del estado de conexión. Sin caché, cada no-match pagaba un GET de hasta 5 s.
+    KIOSK_CONEXION_TTL_SEG:      float = 30.0
+
     # ── Fichaje local ─────────────────────────────────────────────────────────
     # Puerta donde ficha este kiosko (debe existir en el roster). Si es None, se usa
     # la primera puerta activa del roster local. id_dispositivo_origen = auditoría offline.

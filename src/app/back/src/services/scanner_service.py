@@ -16,10 +16,11 @@ import logging
 from datetime import date, datetime, timezone
 
 from sqlalchemy.orm import Session
-from sqlalchemy import text
+from sqlalchemy import null, text
 from sqlalchemy.exc import IntegrityError
 from fastapi import HTTPException, status
 
+from src.core.config import settings
 from src.models.Escaneo_Model import Escaneo
 from src.models.Incidencia_Model import Incidencia
 from src.models.IntentoAcceso_Model import IntentoAcceso
@@ -48,6 +49,17 @@ def _rechazo(mensaje: str) -> ScanResponse:
     return ScanResponse(acceso=False, mensaje=mensaje, trabajador=None, id_escaneo=None, estado_registro="rechazado")
 
 
+def _pendiente_de_sync():
+    """Valor de 'sincronizado_en' al crear una fila.
+
+    En MODO_KIOSKO devuelve null() —no None— a propósito: la columna tiene un `default`
+    de PYTHON en el modelo, y SQLAlchemy aplica ese default cuando el valor es None. Solo
+    null() fuerza el NULL, que es la marca de 'pendiente de subir' que lee kiosk_local.
+    Fuera del kiosko devuelve None para que aplique el default de siempre (NOW()).
+    """
+    return null() if settings.MODO_KIOSKO else None
+
+
 class ScannerService:
 
     # ── Destino / ubicación (vía facade de tenancy) ────────────────────────────
@@ -58,11 +70,26 @@ class ScannerService:
         puerta = tenancy_service.obtener_puerta(id_puerta, db)
         return puerta.ubicacion if puerta else None
 
-    def _validar_destino(self, id_puerta: int, id_dispositivo: int | None, db: Session) -> None:
+    def _validar_destino(self, id_puerta: int, id_dispositivo: int | None, db: Session) -> int | None:
+        """Valida puerta y dispositivo. Devuelve el id_dispositivo USABLE (o None).
+
+        En MODO_KIOSKO el roster local NO incluye la tabla 'dispositivos' —solo empresas,
+        áreas, puertas, trabajadores y embeddings—, así que un id perfectamente válido en
+        la nube aquí no existe y el 404 impedía fichar. En ese caso NO se rechaza: se
+        ignora la FK (queda NULL) y el id original se guarda en 'id_dispositivo_origen',
+        que es enlace suave y viaja con la cola, así no se pierde la trazabilidad.
+        """
         if tenancy_service.obtener_puerta(id_puerta, db) is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Puerta {id_puerta} no encontrada.")
-        if id_dispositivo is not None and tenancy_service.obtener_dispositivo(id_dispositivo, db) is None:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Dispositivo {id_dispositivo} no encontrado.")
+        if id_dispositivo is None:
+            return None
+        if tenancy_service.obtener_dispositivo(id_dispositivo, db) is not None:
+            return id_dispositivo
+        if settings.MODO_KIOSKO:
+            logger.info("kiosko: dispositivo %s no está en el roster local; se registra como origen.",
+                        id_dispositivo)
+            return None
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Dispositivo {id_dispositivo} no encontrado.")
 
     # ── Registro y validación del escaneo ──────────────────────────────────────
     def _registrar_escaneo(self, escaneo: Escaneo, db: Session) -> Escaneo:
@@ -112,6 +139,7 @@ class ScannerService:
             tipo=tipo,
             id_trabajador=id_trabajador,
             similitud=round(similitud, 3) if similitud is not None else None,
+            sincronizado_en=_pendiente_de_sync(),
         )
         try:
             db.add(intento)
@@ -122,7 +150,9 @@ class ScannerService:
             logger.error("No se pudo registrar el intento [%s]: %s", tipo, getattr(exc, "orig", exc))
             return None
 
-        if recorte is not None:
+        # Sin 'media' en la estación: guardar la foto aquí solo agregaría un timeout por
+        # intento. La evidencia viaja con la cola de intentos que sube kiosk_local.
+        if recorte is not None and not settings.MODO_KIOSKO:
             ruta = media_service.guardar_bytes(recorte, "intentos", f"intento_{intento.id_intento}.jpg")
             if ruta is not None:
                 intento.ruta_foto = ruta
@@ -165,7 +195,7 @@ class ScannerService:
             logger.error("No se pudo registrar incidencia 'acceso_otra_empresa': %s", getattr(exc, "orig", exc))
             return
 
-        if recorte is not None:
+        if recorte is not None and not settings.MODO_KIOSKO:
             ruta = media_service.guardar_bytes(recorte, "incidencias", f"incidencia_{incidencia.id_incidencia}.jpg")
             if ruta is not None:
                 incidencia.ruta_foto = ruta
@@ -199,7 +229,8 @@ class ScannerService:
 
     # ── Registro del escaneo exitoso (común a foto y liveness) ─────────────────
     def _registrar_match(self, res: dict, recorte: bytes | None, id_puerta: int, tipo_registro: str,
-                         id_dispositivo: int | None, db: Session, latitud, longitud, observaciones: str) -> ScanResponse:
+                         id_dispositivo: int | None, db: Session, latitud, longitud, observaciones: str,
+                         id_dispositivo_origen: int | None = None) -> ScanResponse:
         trab = res["trabajador"]  # {id_trabajador, nombre, apellido, id_empresa, similitud}
         similitud = trab["similitud"]
         escaneo = Escaneo(
@@ -207,16 +238,22 @@ class ScannerService:
             id_puerta=id_puerta,
             id_empresa=trab["id_empresa"],
             id_dispositivo=id_dispositivo,
+            id_dispositivo_origen=id_dispositivo_origen,
             tipo_registro=tipo_registro,
             fecha_hora=datetime.now(timezone.utc),
             confianza_biometrica=round(similitud, 2),
             estado_registro="exitoso",
             observaciones=observaciones,
             ubicacion=self._resolver_ubicacion(latitud, longitud, id_puerta, db),
+            sincronizado_en=_pendiente_de_sync(),
         )
         escaneo = self._registrar_escaneo(escaneo, db)
-        self._validar_escaneo_online(escaneo, db)
-        self._guardar_foto_si_incidencia(escaneo, recorte, db)
+        # En el kiosko el escaneo solo se ENCOLA: la nube valida y consolida al recibirlo
+        # (idempotente). Consolidar también aquí dejaría dos verdades de la asistencia, y
+        # 'media' no existe en la estación, así que guardar la foto solo costaría timeouts.
+        if not settings.MODO_KIOSKO:
+            self._validar_escaneo_online(escaneo, db)
+            self._guardar_foto_si_incidencia(escaneo, recorte, db)
 
         brief = TrabajadorBrief(id_trabajador=trab["id_trabajador"], nombre=trab["nombre"],
                                 apellido=trab["apellido"], estado="activo")
@@ -241,13 +278,15 @@ class ScannerService:
 
     # ── Despacho del match según la función de la puerta ────────────────────────
     def _procesar_match(self, res: dict, recorte: bytes | None, id_puerta: int, tipo_registro: str,
-                        id_dispositivo: int | None, db: Session, latitud, longitud, observaciones: str) -> ScanResponse:
+                        id_dispositivo: int | None, db: Session, latitud, longitud, observaciones: str,
+                        id_dispositivo_origen: int | None = None) -> ScanResponse:
         """Puerta 'asistencia' → fichaje; puerta 'control_acceso' → acceso interno (zona)."""
         puerta = tenancy_service.obtener_puerta(id_puerta, db)
         if puerta is not None and puerta.funcion_puerta == "control_acceso":
             return self._evaluar_acceso_interno(res, id_puerta, id_dispositivo, db)
         return self._registrar_match(res, recorte, id_puerta, tipo_registro,
-                                     id_dispositivo, db, latitud, longitud, observaciones)
+                                     id_dispositivo, db, latitud, longitud, observaciones,
+                                     id_dispositivo_origen)
 
     def _evaluar_acceso_interno(self, res: dict, id_puerta: int, id_dispositivo: int | None,
                                 db: Session) -> ScanResponse:
@@ -287,7 +326,10 @@ class ScannerService:
     def procesar_foto_acceso(self, foto_bytes: bytes, id_puerta: int, tipo_registro: str,
                              id_dispositivo: int | None, db: Session, latitud=None, longitud=None,
                              nombre_hint: str | None = None) -> ScanResponse:
-        self._validar_destino(id_puerta, id_dispositivo, db)
+        # En el kiosko un dispositivo desconocido no rechaza el fichaje: se degrada a
+        # 'origen' (ver _validar_destino), porque el roster local no trae ese catálogo.
+        disp_fk = self._validar_destino(id_puerta, id_dispositivo, db)
+        disp_origen = id_dispositivo if disp_fk is None else None
         id_empresa = tenancy_service.empresa_de_puerta(id_puerta, db)
         res = recognition_service.reconocer(foto_bytes, id_empresa, nombre_hint=nombre_hint)
         if res is None:
@@ -307,20 +349,25 @@ class ScannerService:
             if trab_super is not None:
                 return self._procesar_match(
                     {"trabajador": trab_super}, recorte, id_puerta, tipo_registro,
-                    id_dispositivo, db, latitud, longitud,
+                    disp_fk, db, latitud, longitud,
                     observaciones=(f"Acceso 'super' (empresa {trab_super['id_empresa']}) en "
-                                   f"puerta de otra empresa. Similitud: {trab_super['similitud']:.4f}"))
+                                   f"puerta de otra empresa. Similitud: {trab_super['similitud']:.4f}"),
+                    id_dispositivo_origen=disp_origen)
             self._clasificar_no_match(recorte, res.get("det_score", 0.0), res.get("candidato_global"), id_puerta, id_empresa, db)
             return _rechazo("Rostro no reconocido en esta empresa.")
         # match
         sim = res["trabajador"]["similitud"]
-        return self._procesar_match(res, recorte, id_puerta, tipo_registro, id_dispositivo, db, latitud, longitud,
-                                      observaciones=f"Reconocimiento facial. Similitud: {sim:.4f}")
+        return self._procesar_match(res, recorte, id_puerta, tipo_registro, disp_fk, db, latitud, longitud,
+                                      observaciones=f"Reconocimiento facial. Similitud: {sim:.4f}",
+                                      id_dispositivo_origen=disp_origen)
 
     def procesar_fotos_acceso(self, fotos_bytes: list[bytes], id_puerta: int, tipo_registro: str,
                               id_dispositivo: int | None, db: Session, latitud=None, longitud=None,
                               nombre_hint: str | None = None) -> ScanResponse:
-        self._validar_destino(id_puerta, id_dispositivo, db)
+        # En el kiosko un dispositivo desconocido no rechaza el fichaje: se degrada a
+        # 'origen' (ver _validar_destino), porque el roster local no trae ese catálogo.
+        disp_fk = self._validar_destino(id_puerta, id_dispositivo, db)
+        disp_origen = id_dispositivo if disp_fk is None else None
         id_empresa = tenancy_service.empresa_de_puerta(id_puerta, db)
         res = recognition_service.reconocer_liveness(fotos_bytes, id_empresa, nombre_hint=nombre_hint)
         if res is None:
@@ -342,16 +389,18 @@ class ScannerService:
             if trab_super is not None:
                 return self._procesar_match(
                     {"trabajador": trab_super}, recorte, id_puerta, tipo_registro,
-                    id_dispositivo, db, latitud, longitud,
+                    disp_fk, db, latitud, longitud,
                     observaciones=(f"Acceso 'super' (empresa {trab_super['id_empresa']}) en "
-                                   f"puerta de otra empresa. Similitud: {trab_super['similitud']:.4f}"))
+                                   f"puerta de otra empresa. Similitud: {trab_super['similitud']:.4f}"),
+                    id_dispositivo_origen=disp_origen)
             self._clasificar_no_match(recorte, res.get("det_score", 0.0), res.get("candidato_global"), id_puerta, id_empresa, db)
             return _rechazo("Rostro no reconocido en esta empresa.")
         # match
         sim = res["trabajador"]["similitud"]
         mov = res.get("movimiento", 0.0)
-        return self._procesar_match(res, recorte, id_puerta, tipo_registro, id_dispositivo, db, latitud, longitud,
-                                      observaciones=f"Facial + liveness. Similitud: {sim:.4f}, movimiento: {mov:.4f}")
+        return self._procesar_match(res, recorte, id_puerta, tipo_registro, disp_fk, db, latitud, longitud,
+                                      observaciones=f"Facial + liveness. Similitud: {sim:.4f}, movimiento: {mov:.4f}",
+                                      id_dispositivo_origen=disp_origen)
 
 
 scanner_service = ScannerService()

@@ -10,21 +10,25 @@
 
 param(
     [string]$Namespace = "ghcr.io/danzito14",   # <-- ajusta a tu usuario/org de GitHub
-    [string]$Version   = "1.0.0"
+    [string]$Version   = "1.0.2"
 )
 $ErrorActionPreference = "Stop"
 $docker = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)  # -> src/docker
 
-Write-Host "== 1/3 Construyendo imágenes (postgres + recognition LIGERA + kiosk_local) ==" -ForegroundColor Cyan
+Write-Host "== 1/3 Construyendo imágenes (postgres + recognition LIGERA + back + kiosk_local) ==" -ForegroundColor Cyan
 docker compose -f "$docker/docker-compose.prod.yml" build postgres
 # recognition SIN hornear buffalo_l (imagen ligera): el modelo se baja en la instalación.
 docker build --build-arg BAKE_MODEL=false -t sl-recognition:desktop "$docker/../app/recognition"
-docker compose -f "$docker/docker-compose.local.yml" -p kiosk build kiosk_local
+# El MISMO back de la nube: en la estación corre con MODO_KIOSKO=true y sirve /scanner/*,
+# por eso el escáner offline se comporta igual que el online.
+docker compose -f "$docker/docker-compose.prod.yml" build backend
+docker compose -f "$docker/docker-compose.local.yml" -p kiosk_dev build kiosk_local
 
 # Mapa imagen LOCAL -> imagen REMOTA (GHCR). postgres mantiene su tag pg17.
 $map = [ordered]@{
     "pgvector-postgis:pg17" = "$Namespace/pgvector-postgis:pg17"
     "sl-recognition:desktop" = "$Namespace/sl-recognition:$Version"
+    "fe-scanner-backend:latest" = "$Namespace/sl-backend:$Version"
     "sl-kiosk-local:latest" = "$Namespace/sl-kiosk-local:$Version"
 }
 

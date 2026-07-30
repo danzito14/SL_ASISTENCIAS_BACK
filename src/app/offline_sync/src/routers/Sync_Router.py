@@ -53,7 +53,7 @@ def _meta_modelo(nombre: str) -> dict:
 @router.get(
     "/roster",
     response_model=RosterResponse,
-    summary="Roster (trabajadores + embeddings + áreas + puertas) para operar offline",
+    summary="Roster (trabajadores + embeddings + áreas + puertas + dispositivos) para operar offline",
     description="Acotado a la empresa del usuario kiosko y al `tipo` del dispositivo "
                 "(campo|oficina|empaque|mixto). 'mixto' = oficina + empaque juntos "
                 "(entrada compartida). Regla A: estricto por tipo de área + 'super'.",

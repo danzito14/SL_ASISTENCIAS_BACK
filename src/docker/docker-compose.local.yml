@@ -1,15 +1,22 @@
 # Mini-stack LOCAL del kiosko de escritorio (corre en la PC del kiosko, NO en la nube).
 # Fase 1: postgres local (roster) + kiosk_local (baja el roster de la nube).
 # Fase 2: se suma 'recognition' (mismo código de prod) para reconocer offline.
-# Arranque:  docker compose -f docker-compose.local.yml -p kiosk up -d --build
-name: kiosk
+# Arranque:  docker compose -f docker-compose.local.yml up -d --build
+#
+# OJO con el nombre: este stack es de DESARROLLO y se llama 'kiosk_dev' (contenedores
+# kiosk_dev_*) a propósito. Antes se llamaba 'kiosk', igual que el del instalador, y en
+# una PC con ambos se pisaban los contenedores Y el volumen de datos: el de dev inicializa
+# la BD con la contraseña por default y el instalado con un secreto aleatorio, así que el
+# segundo en arrancar moría con "password authentication failed for user root".
+# NO pases -p kiosk: eso reintroduce exactamente ese choque.
+name: kiosk_dev
 
 services:
   # Postgres+pgvector LOCAL — mismo esquema que prod (init.sql). Guarda el roster de
   # UNA empresa + la cola de escaneos. Solo escucha en localhost.
   kiosk_postgres:
     image: pgvector-postgis:pg17            # imagen ya construida por el stack principal
-    container_name: kiosk_postgres
+    container_name: kiosk_dev_postgres
     command:
       - "postgres"
       - "-c"
@@ -35,12 +42,17 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
+      # Con el volumen vacío, initdb + init.sql + roles pueden pasar de los 50 s que dan
+      # interval*retries en un equipo lento; sin esto el contenedor se marca unhealthy y
+      # el resto muere con "dependency failed to start". Durante start_period los
+      # chequeos fallidos no cuentan.
+      start_period: 180s
 
   # Backend local: baja el roster de la nube → BD local. Escucha en localhost:8100.
   kiosk_local:
     build: ../app/kiosk_local
     image: sl-kiosk-local:latest
-    container_name: kiosk_local
+    container_name: kiosk_dev_local
     environment:
       DB_HOST: kiosk_postgres
       DB_PORT: "5432"
@@ -59,10 +71,43 @@ services:
       # Reconocimiento LOCAL (contenedor recognition de abajo, apuntando a la BD local).
       RECOGNITION_URL: http://recognition:8000
       RECOGNITION_INTERNAL_TOKEN: ${RECOGNITION_INTERNAL_TOKEN:-kiosk-local-token}
+      # Escáner unificado: /scanner/* se reenvía al back local (mismas rutas que la nube).
+      BACKEND_LOCAL_URL: http://backend:8000
+      BACKEND_GATEWAY_TOKEN: ${KIOSK_GATEWAY_TOKEN:-CAMBIAR_gateway_kiosk}
+      KIOSK_SCANNER_FALLBACK_NUBE: ${KIOSK_SCANNER_FALLBACK:-true}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     ports:
       - "127.0.0.1:8100:8000"
+    depends_on:
+      kiosk_postgres:
+        condition: service_healthy
+      backend:
+        condition: service_started
+
+  # El MISMO back de la nube, en MODO_KIOSKO y contra la BD local. Es quien resuelve
+  # /scanner/* (kiosk_local solo hace de gateway y lo reenvía), así que el escáner offline
+  # ejecuta EXACTAMENTE el mismo código que el online. Sin puerto publicado: interno.
+  backend:
+    build: ../app/back
+    image: fe-scanner-backend:latest
+    container_name: kiosk_dev_backend
+    environment:
+      DB_HOST: kiosk_postgres
+      DB_PORT: "5432"
+      DB_USER: root
+      DB_PASSWORD: ${KIOSK_DB_PASSWORD:-CAMBIAR_kiosk}
+      DB_NAME: SL_ASISTENCIAS
+      APP_TITLE: "SL Asistencias (kiosko dev)"
+      APP_VERSION: "1.0.0"      # obligatoria en back/core/config.py (sin default)
+      DEBUG: ${KIOSK_DEBUG:-false}
+      EMPRESA_ADMIN: "99"
+      # Encola el escaneo (sincronizado_en NULL) y no consolida ni guarda fotos por media:
+      # eso lo hace la nube al recibir la cola. Ver back/src/services/scanner_service.py.
+      MODO_KIOSKO: "true"
+      GATEWAY_INTERNAL_TOKEN: ${KIOSK_GATEWAY_TOKEN:-CAMBIAR_gateway_kiosk}
+      RECOGNITION_SERVICE_URL: http://recognition:8000
+      RECOGNITION_INTERNAL_TOKEN: ${RECOGNITION_INTERNAL_TOKEN:-kiosk-local-token}
     depends_on:
       kiosk_postgres:
         condition: service_healthy
@@ -72,7 +117,7 @@ services:
   # (ya construida por el stack principal). Conecta como root (superuser local) = SELECT libre.
   recognition:
     image: sl-recognition:latest
-    container_name: kiosk_recognition
+    container_name: kiosk_dev_recognition
     environment:
       DB_HOST: kiosk_postgres
       DB_PORT: "5432"

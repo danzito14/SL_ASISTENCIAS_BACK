@@ -5,6 +5,7 @@
 # roster, el kiosko opera offline.
 import logging
 import threading
+import time
 
 import httpx
 
@@ -21,6 +22,10 @@ class CloudClient:
         # otra empresa): mejor fallar y que el front vuelva a iniciar sesión.
         self._token_externo = False
         self._lock = threading.Lock()
+        # Caché del estado de conexión (ver hay_conexion_cache).
+        self._lock_conexion = threading.Lock()
+        self._conexion_ultima = False
+        self._conexion_hasta = 0.0
         self._client = httpx.Client(base_url=settings.CLOUD_BASE_URL, timeout=settings.HTTP_TIMEOUT)
 
     def set_token(self, token: str) -> None:
@@ -109,6 +114,21 @@ class CloudClient:
             return r.json()
         raise RuntimeError("cloud: no se pudo autenticar para el fallback liveness.")
 
+    def reenviar_scanner(self, path: str, params: dict, cuerpo: bytes, content_type: str):
+        """Reenvía TAL CUAL una petición de /scanner/* a la nube, sin volver a parsear el
+        multipart. Lo usa el proxy de /scanner cuando el back LOCAL no reconoce y el
+        fallback está encendido; así vale igual para /acceso/foto que para /acceso/liveness."""
+        for intento in (1, 2):
+            token = self._token_asegurar()
+            r = self._client.post(path, params=params, content=cuerpo,
+                                  headers={"Authorization": f"Bearer {token}",
+                                           "Content-Type": content_type})
+            if r.status_code == 401 and intento == 1 and not self._token_externo:
+                self._invalidar()
+                continue
+            return r
+        raise RuntimeError("cloud: no se pudo autenticar para el reenvío del escáner.")
+
     def subir_asistencias(self, csv_bytes: bytes) -> dict:
         """Sube la cola de escaneos a la nube (POST /off_sync/asistencias, CSV). La nube
         inserta escaneos (idempotente por UUID) + deriva entrada/salida + consolida.
@@ -166,6 +186,22 @@ class CloudClient:
             return True
         except Exception:
             return False
+
+    def hay_conexion_cache(self, ttl_seg: float | None = None) -> bool:
+        """hay_conexion() con caché corta. En el camino del fichaje NO se puede sondear la
+        red en cada frame: sin internet, ese GET se come hasta 5 s por intento fallido y es
+        la causa principal de que el escáner local 'tarde mucho'. Se cachea también el
+        resultado NEGATIVO, que es justo el caso caro."""
+        ttl = settings.KIOSK_CONEXION_TTL_SEG if ttl_seg is None else ttl_seg
+        ahora = time.monotonic()
+        with self._lock_conexion:
+            if self._conexion_hasta > ahora:
+                return self._conexion_ultima
+        ok = self.hay_conexion()
+        with self._lock_conexion:
+            self._conexion_ultima = ok
+            self._conexion_hasta = time.monotonic() + ttl
+        return ok
 
 
 cloud_client = CloudClient()

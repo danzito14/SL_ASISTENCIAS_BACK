@@ -41,6 +41,13 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
+      # CRÍTICO en la PRIMERA instalación: con el volumen vacío, Postgres corre initdb +
+      # init.sql + los roles, y en un equipo lento eso pasa de los 50 s que dan
+      # interval*retries. Sin start_period esos fallos cuentan como reintentos, el
+      # contenedor se marca unhealthy y los demás mueren con "dependency failed to start"
+      # aunque la BD termine levantando bien un minuto después. Durante start_period los
+      # chequeos fallidos NO cuentan.
+      start_period: 180s
 
   # Reconocimiento LOCAL (imagen LIGERA: buffalo_l NO horneado). El modelo vive en el
   # volumen modelos_insightface (lo baja el instalador una vez → persiste entre reinicios).
@@ -60,6 +67,11 @@ services:
       # COMPLETO → MiniFASNet obtiene su contexto 2.7×. Con recortes daba falso spoof.
       ANTISPOOFING_ACTIVO: ${KIOSK_ANTISPOOF:-true}
       ANTISPOOF_UMBRAL: ${KIOSK_ANTISPOOF_UMBRAL:-0.6}
+      # CRÍTICO: estos dos definen el PREPROCESAMIENTO del MiniFASNet. Sin ellos el
+      # servicio usa su default DIV255=true y el modelo devuelve basura → marca spoof a
+      # TODO (cara real incluida). Los valores validados en prod son 1 / false.
+      ANTISPOOF_REAL_INDEX: ${KIOSK_ANTISPOOF_REAL_INDEX:-1}
+      ANTISPOOF_DIV255: ${KIOSK_ANTISPOOF_DIV255:-false}
       # Gate de calidad OFF por default (como la nube), para no rechazar planos generales
       # de webcam. Se puede activar por sitio desde el panel de calibración si hace falta.
       CALIDAD_GATE_ACTIVO: ${KIOSK_CALIDAD_GATE:-false}
@@ -73,6 +85,37 @@ services:
       CONFIG_RUNTIME_TTL: ${KIOSK_CONFIG_RUNTIME_TTL:-15}
     volumes:
       - modelos_insightface:/root/.insightface   # buffalo_l descargado en la instalación
+    depends_on:
+      kiosk_postgres:
+        condition: service_healthy
+
+  # Back de la NUBE corriendo EN LA ESTACIÓN (MODO_KIOSKO). Es el MISMO código y las
+  # MISMAS rutas /scanner/* que en producción: por eso el escáner offline se comporta
+  # igual que el online. No publica puerto: solo kiosk_local (que hace de gateway) lo
+  # alcanza, por la red interna y con X-Gateway-Token.
+  backend:
+    image: ${REGISTRY:-ghcr.io/danzito14}/sl-backend:${IMG_VERSION:-1.0.0}
+    container_name: kiosk_backend
+    restart: unless-stopped
+    environment:
+      DB_HOST: kiosk_postgres
+      DB_PORT: "5432"
+      DB_USER: root
+      DB_PASSWORD: ${KIOSK_DB_PASSWORD}
+      DB_NAME: SL_ASISTENCIAS
+      APP_TITLE: "SL Asistencias (kiosko)"
+      APP_VERSION: "1.0.0"      # obligatoria en back/core/config.py (sin default)
+      DEBUG: "false"
+      EMPRESA_ADMIN: "99"
+      # Encola el escaneo (sincronizado_en NULL) y NO consolida ni guarda fotos: de eso
+      # se encarga la nube al recibir la cola. Sin esto, el fichaje nacería marcado como
+      # sincronizado y NUNCA subiría.
+      MODO_KIOSKO: "true"
+      # Prueba de que la petición viene de kiosk_local y no de alguien hablándole directo
+      # al contenedor (mismo rol que el X-Gateway-Token de Traefik en prod).
+      GATEWAY_INTERNAL_TOKEN: ${KIOSK_GATEWAY_TOKEN}
+      RECOGNITION_SERVICE_URL: http://recognition:8000
+      RECOGNITION_INTERNAL_TOKEN: ${RECOGNITION_INTERNAL_TOKEN}
     depends_on:
       kiosk_postgres:
         condition: service_healthy
@@ -100,11 +143,20 @@ services:
       KIOSK_DISPOSITIVO: ${KIOSK_DISPOSITIVO:-}
       RECOGNITION_URL: http://recognition:8000
       RECOGNITION_INTERNAL_TOKEN: ${RECOGNITION_INTERNAL_TOKEN}
+      # Escáner unificado: /scanner/* se reenvía al back local (mismas rutas que la nube).
+      BACKEND_LOCAL_URL: http://backend:8000
+      BACKEND_GATEWAY_TOKEN: ${KIOSK_GATEWAY_TOKEN}
+      # Fallback a la nube en los no reconocidos (recién enrolados que aún no están en el
+      # roster local). Solo se intenta si hay internet, y ese estado va cacheado, así que
+      # offline NO frena el fichaje. Ponlo en false si prefieres el mínimo de latencia.
+      KIOSK_SCANNER_FALLBACK_NUBE: ${KIOSK_SCANNER_FALLBACK:-true}
     ports:
       - "127.0.0.1:8100:8000"
     depends_on:
       kiosk_postgres:
         condition: service_healthy
+      backend:
+        condition: service_started
 
 volumes:
   kiosk_pgdata:

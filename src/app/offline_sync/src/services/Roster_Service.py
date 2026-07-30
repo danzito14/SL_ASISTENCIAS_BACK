@@ -20,8 +20,8 @@ from sqlalchemy.orm import Session
 
 from src.core.config import settings
 from src.schemas.Candidatos_Schema import CandidatosResponse, CandidatoTrabajador
-from src.schemas.Roster_Schema import (RosterArea, RosterPuerta, RosterResponse,
-                                       RosterTrabajador)
+from src.schemas.Roster_Schema import (RosterArea, RosterDispositivo, RosterPuerta,
+                                       RosterResponse, RosterTrabajador)
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +55,20 @@ _SQL_PUERTAS = text("""
     WHERE p.id_empresa = :empresa AND p.funcion_puerta = 'asistencia'
       AND a.tipo_area = ANY(:tipos) AND p.estado = 'activo'
     ORDER BY p.id_puerta
+""")
+
+# Dispositivos (terminales/estaciones) de la empresa. LEFT JOIN + 'id_area IS NULL' a
+# propósito: una PC de kiosko suele no estar atada a un área concreta, y si se filtrara
+# solo por tipo de área se quedaría fuera justo la que ficha. Sin este catálogo en local,
+# el escaneo con id_dispositivo fallaba por la FK.
+_SQL_DISPOSITIVOS = text("""
+    SELECT d.id_dispositivo, d.nombre_dispositivo, d.tipo_dispositivo::text AS tipo_dispositivo,
+           d.id_area
+    FROM dispositivos d
+    LEFT JOIN area_trabajo a ON a.id_area = d.id_area
+    WHERE d.id_empresa = :empresa AND d.estado = 'activo'
+      AND (d.id_area IS NULL OR a.tipo_area = ANY(:tipos))
+    ORDER BY d.id_dispositivo
 """)
 
 # Trabajadores activos SIN rostro (sin embedding activo): candidatos a enrolar.
@@ -119,13 +133,22 @@ class RosterService:
             for p in db.execute(_SQL_PUERTAS, {"empresa": empresa, "tipos": tipos}).all()
         ]
 
+        dispositivos = [
+            RosterDispositivo(id_dispositivo=d.id_dispositivo,
+                              nombre_dispositivo=d.nombre_dispositivo,
+                              tipo_dispositivo=d.tipo_dispositivo, id_area=d.id_area)
+            for d in db.execute(_SQL_DISPOSITIVOS, {"empresa": empresa, "tipos": tipos}).all()
+        ]
+
         version = self._version(empresa, tipo, filas)
-        logger.info("Roster empresa=%s tipo=%s → %d trabajadores, %d áreas, %d puertas (v=%s).",
-                    empresa, tipo, len(trabajadores), len(areas), len(puertas), version)
+        logger.info("Roster empresa=%s tipo=%s → %d trabajadores, %d áreas, %d puertas, "
+                    "%d dispositivos (v=%s).",
+                    empresa, tipo, len(trabajadores), len(areas), len(puertas),
+                    len(dispositivos), version)
         return RosterResponse(
             empresa=empresa, tipo=tipo, roster_version=version,
             total_trabajadores=len(trabajadores), trabajadores=trabajadores,
-            areas=areas, puertas=puertas,
+            areas=areas, puertas=puertas, dispositivos=dispositivos,
         )
 
     def _version(self, empresa: int, tipo: str, filas) -> str:
