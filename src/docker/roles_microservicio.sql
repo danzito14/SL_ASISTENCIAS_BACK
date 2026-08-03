@@ -142,8 +142,12 @@ GRANT USAGE, SELECT ON SEQUENCE
 -- walk-in (upsert de trabajadores/embeddings con id_emp=UUID, origen 'apk').
 -- ════════════════════════════════════════════════════════════════════════════
 -- Roster (solo lectura) + cruzados a tenancy:
+-- 'dispositivos' va aquí porque el roster lo incluye: sin este SELECT la consulta del
+-- roster falla con "permission denied" y /off_sync/roster responde 500. La estación lo
+-- necesita porque el escaneo lleva id_dispositivo con FK y, sin ese catálogo en local,
+-- el back rechazaba el fichaje con "Dispositivo N no encontrado".
 GRANT SELECT ON
-    trabajadores, embeddings, area_trabajo, puertas_acceso, empresas
+    trabajadores, embeddings, area_trabajo, puertas_acceso, empresas, dispositivos
     TO svc_offline;
 -- Enrolamiento walk-in: upsert de trabajadores/embeddings.
 GRANT INSERT, UPDATE ON trabajadores, embeddings TO svc_offline;
