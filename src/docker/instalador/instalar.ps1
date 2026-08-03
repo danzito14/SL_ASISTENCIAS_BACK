@@ -164,6 +164,42 @@ else {
     }
 }
 
+# ── 7-bis. Voces neuronales (piper) ─────────────────────────────────────────
+# La app usa voces neuronales locales (Mio y Noah) para que TODAS las estaciones
+# suenen igual, sin depender de las voces que tenga instalado cada Windows. Se bajan
+# aquí y NO dentro del instalador del front: son ~140 MB que no cambian entre versiones
+# de la app, y la app se actualiza a menudo. Si falla, se usa la voz del sistema.
+Write-Host "== 7-bis Instalando las voces (piper, ~140 MB) ==" -ForegroundColor Cyan
+$vozDir = Join-Path $here "voz"
+$vocesDir = Join-Path $vozDir "voces"
+try {
+    New-Item -ItemType Directory -Force -Path $vocesDir | Out-Null
+
+    if (-not (Test-Path (Join-Path $vozDir "piper\piper.exe"))) {
+        Write-Host "   Descargando el motor..."
+        $zip = Join-Path $vozDir "piper.zip"
+        Invoke-WebRequest -UseBasicParsing -OutFile $zip `
+            -Uri "https://github.com/rhasspy/piper/releases/download/2023.11.14-2/piper_windows_amd64.zip"
+        Expand-Archive -Path $zip -DestinationPath $vozDir -Force
+        Remove-Item $zip -Force
+    } else { Write-Host "   El motor ya estaba instalado." }
+
+    $base = "https://huggingface.co/rhasspy/piper-voices/resolve/main/es"
+    foreach ($voz in @("es_MX/claude/high/es_MX-claude-high", "es_MX/ald/medium/es_MX-ald-medium")) {
+        $archivo = $voz.Split("/")[-1]
+        foreach ($ext in @("onnx", "onnx.json")) {
+            $destino = Join-Path $vocesDir "$archivo.$ext"
+            if ((Test-Path $destino) -and (Get-Item $destino).Length -gt 0) { continue }
+            Write-Host "   Descargando $archivo.$ext ..."
+            Invoke-WebRequest -UseBasicParsing -OutFile $destino -Uri "$base/$voz.$ext"
+        }
+    }
+    Write-Host "   Voces instaladas en $vozDir"
+} catch {
+    Write-Warning "No se pudieron instalar las voces neuronales ($($_.Exception.Message)). La app
+       usará la voz de Windows; puedes reintentarlo volviendo a ejecutar el instalador."
+}
+
 Write-Host ""
 Write-Host "== Instalación completa ==" -ForegroundColor Green
 Write-Host "El kiosko escucha en http://localhost:8100 (el front apunta ahí)."

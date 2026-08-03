@@ -317,6 +317,49 @@ else
     fi
 fi
 
+# ── 7-bis. Voces neuronales (piper) ──────────────────────────────────────────
+# La app habla con la Web Speech API, que en Linux sale por eSpeak y suena a robot.
+# Con piper la estación usa voces neuronales locales (Mio y Noah) y suena igual en
+# todas las máquinas. Se bajan AQUÍ y no dentro del .deb a propósito: son 120 MB que no
+# cambian entre versiones del front, y el front se actualiza a menudo.
+# Si esto falla, la instalación continúa: la app cae a la voz del sistema.
+VOZ_DIR="${VOZ_DIR:-/opt/sl-asistencias/voz}"
+PIPER_URL="https://github.com/rhasspy/piper/releases/download/2023.11.14-2/piper_linux_x86_64.tar.gz"
+VOCES_BASE="https://huggingface.co/rhasspy/piper-voices/resolve/main/es"
+
+instalar_voces() {
+    titulo "7-bis Instalando las voces (piper, ~145 MB)"
+    sudo install -d -m 0755 "$VOZ_DIR" "$VOZ_DIR/voces"
+    sudo chown -R "$(id -u):$(id -g)" "$VOZ_DIR"
+
+    if [[ ! -x "$VOZ_DIR/piper/piper" ]]; then
+        paso "Descargando el motor..."
+        curl -fL --progress-bar -o "$VOZ_DIR/piper.tar.gz" "$PIPER_URL"
+        tar -xzf "$VOZ_DIR/piper.tar.gz" -C "$VOZ_DIR"
+        rm -f "$VOZ_DIR/piper.tar.gz"
+    else
+        paso "El motor ya estaba instalado."
+    fi
+
+    # Mio (femenina, avisos) y Noah (masculina, registro de reporte).
+    for voz in "es_MX/claude/high/es_MX-claude-high" "es_MX/ald/medium/es_MX-ald-medium"; do
+        local archivo="${voz##*/}"
+        for ext in onnx onnx.json; do
+            if [[ -s "$VOZ_DIR/voces/$archivo.$ext" ]]; then continue; fi
+            paso "Descargando $archivo.$ext ..."
+            # -L obligatorio: sin seguir la redirección se baja la página, no el modelo.
+            curl -fL --progress-bar -o "$VOZ_DIR/voces/$archivo.$ext" "$VOCES_BASE/$voz.$ext"
+        done
+    done
+    chmod -R a+rX "$VOZ_DIR"
+    paso "Voces instaladas en $VOZ_DIR"
+}
+
+if ! instalar_voces; then
+    aviso "No se pudieron instalar las voces neuronales. La app usará la voz del sistema;
+       puedes reintentarlo después volviendo a ejecutar este instalador."
+fi
+
 # ── 8. La app (Electron), si se pasó su .deb ─────────────────────────────────
 # El instalador de Windows hace esto solo (#define FrontUrl). Aquí es opcional porque
 # necesita sudo y no siempre se instala la app en la misma pasada que el backend.
