@@ -17,11 +17,11 @@
 set -Eeuo pipefail
 
 AQUI="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-VERSION="${1:-1.1.2}"; shift || true
+VERSION="${1:-1.1.3}"; shift || true
 # .deb de la app (Electron) que el .run descargará e instalará. Cumple el mismo papel que
 # el '#define FrontUrl' del .iss en Windows: actualízalo en CADA release del front, porque
 # el escáner offline solo funciona con un front que traiga el cambio de scannerUrl.
-FRONT_URL="https://github.com/danzito14/FP_ESCANER_FRONT/releases/download/0.2.7_Linux/SL-Asistencias-Estacion-0.2.7.deb"
+FRONT_URL="https://github.com/danzito14/FP_ESCANER_FRONT/releases/download/0.2.9_Linux/SL-Asistencias-Estacion-0.2.9.deb"
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --front-url) FRONT_URL="$2"; shift 2 ;;
