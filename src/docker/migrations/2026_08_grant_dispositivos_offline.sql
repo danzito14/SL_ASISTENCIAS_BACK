@@ -1,0 +1,14 @@
+-- 2026_08_grant_dispositivos_offline.sql
+--
+-- Da a svc_offline permiso de LECTURA sobre 'dispositivos'.
+--
+-- MOTIVO: el roster que baja la estación ahora incluye los dispositivos (el escaneo
+-- lleva id_dispositivo con FK y, sin ese catálogo en local, el back rechazaba el
+-- fichaje con "Dispositivo N no encontrado"). offline_sync conecta con el rol de
+-- mínimo privilegio svc_offline, que NO tenía SELECT sobre esa tabla: la consulta
+-- fallaba con "permission denied" y /off_sync/roster respondía 500.
+--
+-- roles_microservicio.sql ya lo incluye para instalaciones nuevas, pero ese archivo
+-- SOLO se ejecuta al inicializar un volumen vacío: en una base existente hay que
+-- aplicar este GRANT. Idempotente.
+GRANT SELECT ON dispositivos TO svc_offline;
