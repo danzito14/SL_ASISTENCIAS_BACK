@@ -237,6 +237,12 @@ services:
       MEDIA_URL: /media
       MEDIA_INTERNAL_TOKEN: ${MEDIA_INTERNAL_TOKEN}
       DEBUG: "false"
+      # Retención de las fotos de evidencia: se borran al mes. Son dato biométrico y
+      # su valor probatorio es corto; el REGISTRO de la incidencia/intento se conserva.
+      # La otra mitad (soltar la columna ruta_foto) la hace el job de pg_cron
+      # 'purgar-fotos-vencidas': si cambias los días, cámbialos en LOS DOS sitios.
+      # 0 = no borrar nunca.
+      MEDIA_RETENCION_DIAS: ${MEDIA_RETENCION_DIAS:-30}
     labels:
       - "traefik.enable=false"   # interno: nunca expuesto por el gateway
     volumes:

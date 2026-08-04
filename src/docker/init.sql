@@ -916,6 +916,7 @@ DECLARE
     v_poligono       geography(POLYGON,4326);
     v_dentro         BOOLEAN;
     v_geo_indet      BOOLEAN;
+    v_hay_geocercas  BOOLEAN;
     v_nuevo_estado   estado_registro;
     v_tipo_inc       tipo_incidencia;
     v_desc           TEXT;
@@ -966,29 +967,59 @@ BEGIN
         IF v_nuevo_estado IS NULL AND v_permiso = 'super' THEN
             -- 'super' ficha en cualquier lado → exento de la geocerca.
             v_geo_indet := TRUE;
-        ELSIF v_nuevo_estado IS NULL THEN
-            -- Geocerca: puerta de campo + trabajador de campo = su ÁREA asignada
-            -- (verifica al jornalero en su campo). En cualquier otro caso
-            -- (general/administrativo, o campo en puerta administrativa) = polígono
-            -- de la EMPRESA (roaming dentro de la empresa).
-            IF v_tipo_puerta = 'campo' AND v_permiso = 'campo' THEN
-                SELECT a.ubicacion INTO v_poligono
-                  FROM trabajadores t
-                  JOIN area_trabajo a ON a.id_area = t.id_area
-                 WHERE t.id_trabajador = r.id_trabajador;
-            ELSE
-                SELECT em.ubicacion INTO v_poligono
-                  FROM empresas em WHERE em.id_empresa = v_emp_puerta;
-            END IF;
+        ELSIF v_tipo_puerta = 'campo' AND v_permiso = 'campo' THEN
+            -- Jornalero en puerta de campo: se exige su ÁREA ASIGNADA (lo verifica en
+            -- SU campo, no en cualquiera).
+            SELECT a.ubicacion INTO v_poligono
+              FROM trabajadores t
+              JOIN area_trabajo a ON a.id_area = t.id_area
+             WHERE t.id_trabajador = r.id_trabajador;
 
             IF v_poligono IS NULL OR r.ubicacion IS NULL THEN
-                -- Sin datos para juzgar (offline sin GPS o sin geocerca): NO penalizar.
+                v_geo_indet := TRUE;   -- sin GPS o sin geocerca: NO penalizar
+            ELSIF NOT ST_Covers(v_poligono, r.ubicacion) THEN
+                v_nuevo_estado := 'fuera_de_area'; v_tipo_inc := 'fuera_de_area';
+                v_desc := 'Ubicación fuera del área asignada al trabajador.';
+            END IF;
+
+        ELSIF v_nuevo_estado IS NULL THEN
+            -- Quien puede fichar en cualquier escáner (administrativo/general, y campo en
+            -- puerta administrativa) debe estar dentro de ALGÚN polígono REGISTRADO de su
+            -- empresa: el de la EMPRESA o el de CUALQUIER área (campo, empaque, oficina).
+            -- Da igual cuál: lo que se garantiza es que el fichaje ocurrió en un lugar
+            -- dado de alta en el sistema, y no en su casa o en la playa. Un área
+            -- administrativa que hereda las coordenadas de la empresa también vale.
+            SELECT EXISTS (
+                SELECT 1 FROM empresas em
+                 WHERE em.id_empresa = v_emp_puerta AND em.ubicacion IS NOT NULL
+                UNION ALL
+                SELECT 1 FROM area_trabajo a
+                 WHERE a.id_empresa = v_emp_puerta
+                   AND a.estado = 'activo' AND a.ubicacion IS NOT NULL
+            ) INTO v_hay_geocercas;
+
+            IF NOT v_hay_geocercas OR r.ubicacion IS NULL THEN
+                -- Sin GPS, o empresa sin NINGÚN polígono cargado: indeterminado. Es
+                -- deliberado: si no hay contra qué comparar, marcar a todos fuera de área
+                -- sería un falso positivo masivo.
                 v_geo_indet := TRUE;
             ELSE
-                v_dentro := ST_Covers(v_poligono, r.ubicacion);
+                SELECT EXISTS (
+                    SELECT 1 FROM empresas em
+                     WHERE em.id_empresa = v_emp_puerta
+                       AND em.ubicacion IS NOT NULL
+                       AND ST_Covers(em.ubicacion, r.ubicacion)
+                    UNION ALL
+                    SELECT 1 FROM area_trabajo a
+                     WHERE a.id_empresa = v_emp_puerta
+                       AND a.estado = 'activo'
+                       AND a.ubicacion IS NOT NULL
+                       AND ST_Covers(a.ubicacion, r.ubicacion)
+                ) INTO v_dentro;
+
                 IF NOT v_dentro THEN
                     v_nuevo_estado := 'fuera_de_area'; v_tipo_inc := 'fuera_de_area';
-                    v_desc := 'Ubicación fuera del área permitida.';
+                    v_desc := 'Ubicación fuera de todo polígono registrado (empresa y áreas).';
                 END IF;
             END IF;
         END IF;
@@ -1355,6 +1386,60 @@ BEGIN
 EXCEPTION WHEN OTHERS THEN
     NULL;  -- si pg_cron no está listo aún, se ignora
 END $$;
+
+-- ════════════════════════════════════════════════════════════════════════════
+-- 9c) RETENCIÓN DE FOTOS — soltar la referencia a las imágenes vencidas
+-- ────────────────────────────────────────────────────────────────────────────
+-- Las fotos de evidencia (incidencias e intentos) se guardan un mes y se borran:
+-- son dato biométrico y su valor probatorio es de corto plazo. El microservicio
+-- 'media' borra los ARCHIVOS por antigüedad (MEDIA_RETENCION_DIAS); aquí se limpia
+-- la COLUMNA para que la interfaz no quede mostrando imágenes rotas.
+--
+-- Solo se toca 'ruta_foto': la incidencia y el intento se conservan, porque el
+-- registro es la evidencia auditable y la imagen es solo el respaldo visual.
+-- NO afecta a trabajadores.foto_perfil, que es la foto de enrolamiento y vive en la
+-- BD, no en media.
+CREATE OR REPLACE FUNCTION purgar_fotos_vencidas(p_dias INT DEFAULT 30)
+RETURNS TABLE(incidencias_limpiadas INT, intentos_limpiados INT)
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_corte TIMESTAMPTZ := now() - make_interval(days => p_dias);
+    v_inc   INT := 0;
+    v_int   INT := 0;
+BEGIN
+    WITH u AS (
+        UPDATE incidencias SET ruta_foto = NULL
+         WHERE ruta_foto IS NOT NULL AND fecha_creacion < v_corte
+        RETURNING 1
+    ) SELECT COUNT(*) INTO v_inc FROM u;
+
+    WITH u AS (
+        UPDATE intentos_acceso SET ruta_foto = NULL
+         WHERE ruta_foto IS NOT NULL AND fecha < v_corte
+        RETURNING 1
+    ) SELECT COUNT(*) INTO v_int FROM u;
+
+    incidencias_limpiadas := v_inc;
+    intentos_limpiados    := v_int;
+    RETURN NEXT;
+END;
+$$;
+
+DO $$
+BEGIN
+    PERFORM cron.unschedule('purgar-fotos-vencidas') FROM cron.job
+     WHERE jobname = 'purgar-fotos-vencidas';
+EXCEPTION WHEN OTHERS THEN
+    NULL;
+END $$;
+
+-- A las 3:30, después de la consolidación diaria.
+SELECT cron.schedule(
+    'purgar-fotos-vencidas',
+    '30 3 * * *',
+    $cron$ SELECT purgar_fotos_vencidas(30); $cron$
+);
 
 SELECT cron.schedule(
     'consolidar-asistencia-diaria',

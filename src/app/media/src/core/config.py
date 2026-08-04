@@ -18,6 +18,23 @@ class Settings(BaseSettings):
     # si está vacío, se rechaza todo.
     MEDIA_INTERNAL_TOKEN: str = os.getenv("MEDIA_INTERNAL_TOKEN", "")
 
+    # ── Retención de fotos ────────────────────────────────────────────────────
+    # Las fotos de incidencias e intentos son evidencia puntual y dato biométrico:
+    # se conservan un mes y se borran. El REGISTRO (la incidencia, el intento) se
+    # queda para siempre; lo que se elimina es la imagen. Minimiza el daño de un robo
+    # del equipo y el volumen del disco, que crece con cada rostro no reconocido.
+    # 0 = no borrar nunca.
+    MEDIA_RETENCION_DIAS: int = 30
+    # Solo estas subcarpetas se purgan. Se listan explícitamente para que, si mañana
+    # se guarda aquí algo que deba conservarse, no desaparezca por barrido.
+    MEDIA_PURGA_SUBCARPETAS: str = "incidencias,intentos"
+    # Cada cuánto barre (el servicio corre siempre; no hay cron en este contenedor).
+    MEDIA_PURGA_INTERVALO_HORAS: float = 24.0
+
+    @property
+    def purga_subcarpetas(self) -> list[str]:
+        return [s.strip() for s in self.MEDIA_PURGA_SUBCARPETAS.split(",") if s.strip()]
+
     @property
     def media_base_dir(self) -> str:
         """Ruta ABSOLUTA de la carpeta de media. Si MEDIA_DIR es relativo, se ancla a
