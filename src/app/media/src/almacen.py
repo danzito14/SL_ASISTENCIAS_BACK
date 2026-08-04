@@ -8,6 +8,7 @@ object storage (S3/MinIO) en el futuro, se reimplementa aquí sin tocar a nadie 
 import logging
 import os
 import re
+import time
 
 from src.core.config import settings
 
@@ -53,3 +54,45 @@ def ruta_archivo(subcarpeta: str, nombre: str) -> str | None:
     """Ruta ABSOLUTA del archivo si existe (y es seguro), o None."""
     ruta = _ruta_abs(subcarpeta, nombre)
     return ruta if (ruta and os.path.isfile(ruta)) else None
+
+
+def purgar_antiguos(dias: int, subcarpetas: list[str]) -> dict[str, int]:
+    """
+    Borra los archivos con más de `dias` de antigüedad en las subcarpetas indicadas.
+
+    Se decide por la FECHA DEL ARCHIVO (mtime) y no consultando la base: media no tiene
+    BD ni sabe a qué incidencia pertenece cada imagen, y esa independencia es lo que
+    permite cambiar el almacenamiento sin tocar al resto. La contrapartida es que la
+    limpieza de las columnas 'ruta_foto' va por su lado (job de pg_cron), con la misma
+    ventana de días.
+
+    dias <= 0 desactiva la purga. Devuelve {borrados, errores}.
+    """
+    if dias <= 0:
+        return {"borrados": 0, "errores": 0}
+
+    limite = time.time() - dias * 86400
+    borrados = errores = 0
+    base = os.path.normpath(settings.media_base_dir)
+
+    for sub in subcarpetas:
+        if not _seguro(sub):
+            logger.warning("Subcarpeta de purga inválida, se omite: %r", sub)
+            continue
+        carpeta = os.path.join(base, sub)
+        if not os.path.isdir(carpeta):
+            continue
+        for nombre in os.listdir(carpeta):
+            ruta = os.path.join(carpeta, nombre)
+            try:
+                if not os.path.isfile(ruta) or os.path.getmtime(ruta) >= limite:
+                    continue
+                os.remove(ruta)
+                borrados += 1
+            except OSError as exc:
+                errores += 1
+                logger.warning("No se pudo borrar %s: %s", ruta, exc)
+
+    if borrados or errores:
+        logger.info("Purga de fotos (>%d días): %d borradas, %d errores.", dias, borrados, errores)
+    return {"borrados": borrados, "errores": errores}
