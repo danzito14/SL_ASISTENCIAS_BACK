@@ -17,9 +17,11 @@ from sqlalchemy.orm import Session
 
 from src.models.AreaTrabajo_Trabajador_Model import AreaTrabajo, Trabajador
 from src.models.Asistencia_HistorialAuditoria_Model import Asistencia
+from src.models.Embedding_Model import Embedding
 from src.models.Empresa_Model import Empresa
 from src.models.Incidencia_Model import Incidencia
 from src.models.IntentoAcceso_Model import IntentoAcceso
+from src.models.Puerta_Model import PuertaAcceso
 
 XLSX_MEDIA = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
@@ -37,6 +39,22 @@ def _celda(v):
     if isinstance(v, UUID):   # openpyxl no acepta objetos UUID; las PKs ahora son UUID
         return str(v)
     return v
+
+
+def _a_local(dt: datetime, zona: str | None, cache: dict) -> datetime:
+    """Pasa un timestamptz a la hora local de la empresa (UTC si no hay zona válida)."""
+    if zona not in cache:
+        try:
+            cache[zona] = ZoneInfo(zona) if zona else timezone.utc
+        except Exception:
+            cache[zona] = timezone.utc
+    # fecha_hora es timestamptz (aware); si viniera naive, se asume UTC.
+    aware = dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+    return aware.astimezone(cache[zona])
+
+
+def _si_no(v: bool | None) -> str:
+    return "" if v is None else ("Sí" if v else "No")
 
 
 def _hasta_fin_de_dia(fecha_fin: date) -> datetime:
@@ -103,37 +121,58 @@ class ReporteService:
     def asistencias(
         self, db: Session, id_empresa: int | None, fecha_inicio: date | None,
         fecha_fin: date | None, formato: str, id_trabajador: int | None = None,
+        tipo: str | None = None,
     ) -> StreamingResponse:
-        q = db.query(Asistencia, Trabajador).join(
-            Trabajador, Trabajador.id_trabajador == Asistencia.id_trabajador
+        """
+        Asistencias con el N° de empleado de SYS21 y la fecha/hora en columnas
+        separadas, en la zona horaria de la empresa donde se fichó (fecha_hora es UTC).
+        'tipo' acota a solo entradas o solo salidas.
+        """
+        q = (
+            db.query(Asistencia, Trabajador, Empresa, PuertaAcceso)
+            .join(Trabajador, Trabajador.id_trabajador == Asistencia.id_trabajador)
+            .outerjoin(Empresa, Empresa.id_empresa == Asistencia.id_empresa)
+            .outerjoin(PuertaAcceso, PuertaAcceso.id_puerta == Asistencia.id_puerta)
         )
         if id_empresa is not None:
             q = q.filter(Asistencia.id_empresa == id_empresa)  # denormalizado (access)
         if id_trabajador is not None:
             q = q.filter(Asistencia.id_trabajador == id_trabajador)
+        if tipo is not None:
+            q = q.filter(Asistencia.tipo_registro == tipo)
         if fecha_inicio is not None:
             q = q.filter(Asistencia.fecha_hora >= fecha_inicio)
         if fecha_fin is not None:
             q = q.filter(Asistencia.fecha_hora < _hasta_fin_de_dia(fecha_fin))
 
-        filas = [
-            {
+        zonas: dict = {}
+        filas = []
+        for a, t, e, p in q.order_by(Asistencia.fecha_hora.desc()).all():
+            local = _a_local(a.fecha_hora, e.zona_horaria if e else None, zonas)
+            filas.append({
                 "id": a.id_asistencia,
+                "id_emp": t.id_emp,
+                "origen_nomina": t.origen_nomina,
                 "trabajador": f"{t.nombre} {t.apellido}",
+                "empresa": e.nombre_empresa if e else None,
+                "puerta": p.nombre_puerta if p else None,
                 "tipo": a.tipo_registro,
-                "fecha_hora": a.fecha_hora,
+                "fecha": local.date(),
+                "hora": local.strftime("%H:%M:%S"),
                 "confianza": a.confianza_biometrica,
                 "estado": a.estado_registro,
+                "dentro_de_area": _si_no(a.dentro_de_area),
                 "observaciones": a.observaciones,
-            }
-            for a, t in q.order_by(Asistencia.fecha_hora.desc()).all()
-        ]
+            })
         columnas = [
-            ("id", "ID"), ("trabajador", "Trabajador"), ("tipo", "Tipo"),
-            ("fecha_hora", "Fecha y hora"), ("confianza", "Confianza"),
-            ("estado", "Estado"), ("observaciones", "Observaciones"),
+            ("id", "ID"), ("id_emp", "N° empleado"), ("origen_nomina", "Nómina"),
+            ("trabajador", "Trabajador"), ("empresa", "Empresa"), ("puerta", "Puerta"),
+            ("tipo", "Tipo"), ("fecha", "Fecha"), ("hora", "Hora"),
+            ("confianza", "Confianza"), ("estado", "Estado"),
+            ("dentro_de_area", "Dentro del área"), ("observaciones", "Observaciones"),
         ]
-        return self._exportar(columnas, filas, "asistencias", formato)
+        nombre = {"entrada": "entradas", "salida": "salidas"}.get(tipo, "asistencias")
+        return self._exportar(columnas, filas, nombre, formato)
 
     def incidencias(
         self, db: Session, id_empresa: int | None, fecha_inicio: date | None,
@@ -207,15 +246,10 @@ class ReporteService:
         # ASC: la primera fila por (trabajador, día local) es su entrada más temprana;
         # así se cuenta UNA sola vez al día (la hora real de llegada).
         vistos: set = set()
+        zonas: dict = {}
         filas = []
         for a, t, ar, e in q.order_by(Asistencia.fecha_hora.asc()).all():
-            try:
-                tz = ZoneInfo(e.zona_horaria) if e.zona_horaria else timezone.utc
-            except Exception:
-                tz = timezone.utc
-            # fecha_hora es timestamptz (aware); si viniera naive, se asume UTC.
-            dt = a.fecha_hora if a.fecha_hora.tzinfo else a.fecha_hora.replace(tzinfo=timezone.utc)
-            local = dt.astimezone(tz)
+            local = _a_local(a.fecha_hora, e.zona_horaria, zonas)
             clave = (t.id_trabajador, local.date())
             if clave in vistos:
                 continue
@@ -279,33 +313,58 @@ class ReporteService:
 
     def trabajadores(
         self, db: Session, id_empresa: int | None, formato: str,
+        rostro: str | None = None,
     ) -> StreamingResponse:
+        """
+        Padrón de trabajadores con su N° de empleado de SYS21 y si tienen rostro
+        registrado. 'rostro' = 'con' | 'sin' acota a los que tienen (o no) embedding;
+        mismo criterio que el conteo con/sin rostro del dashboard.
+        """
         # Los joins a área/empresa se conservan: el reporte muestra sus NOMBRES.
         # El filtro por empresa sí usa el id_empresa denormalizado del trabajador.
+        # embeddings es 1-a-1 con trabajadores (UNIQUE) → el outer join no duplica filas.
         q = (
-            db.query(Trabajador, AreaTrabajo, Empresa)
+            db.query(Trabajador, AreaTrabajo, Empresa, Embedding)
             .join(AreaTrabajo, AreaTrabajo.id_area == Trabajador.id_area)
             .join(Empresa, Empresa.id_empresa == AreaTrabajo.id_empresa)
+            .outerjoin(Embedding, Embedding.id_trabajador == Trabajador.id_trabajador)
         )
         if id_empresa is not None:
             q = q.filter(Trabajador.id_empresa == id_empresa)
+        if rostro == "con":
+            q = q.filter(Embedding.id_embedding.isnot(None))
+        elif rostro == "sin":
+            q = q.filter(Embedding.id_embedding.is_(None))
 
+        zonas: dict = {}
         filas = [
             {
                 "id": t.id_trabajador,
+                "id_emp": t.id_emp,
+                "origen_nomina": t.origen_nomina,
                 "nombre": t.nombre,
                 "apellido": t.apellido,
                 "area": a.nombre_area,
+                "tipo_area": a.tipo_area,
                 "empresa": e.nombre_empresa,
                 "estado": t.estado,
+                "rostro": _si_no(emb is not None),
+                "fecha_rostro": (_a_local(emb.fecha_captura, e.zona_horaria, zonas)
+                                 if emb and emb.fecha_captura else None),
+                "modelo": emb.modelo_ia if emb else None,
             }
-            for t, a, e in q.order_by(Trabajador.id_trabajador).all()
+            for t, a, e, emb in q.order_by(Trabajador.id_trabajador).all()
         ]
         columnas = [
-            ("id", "ID"), ("nombre", "Nombre"), ("apellido", "Apellido"),
-            ("area", "Área"), ("empresa", "Empresa"), ("estado", "Estado"),
+            ("id", "ID"), ("id_emp", "N° empleado"), ("origen_nomina", "Nómina"),
+            ("nombre", "Nombre"), ("apellido", "Apellido"),
+            ("area", "Área"), ("tipo_area", "Tipo de área"), ("empresa", "Empresa"),
+            ("estado", "Estado"), ("rostro", "Tiene rostro"),
+            ("fecha_rostro", "Rostro registrado el"), ("modelo", "Modelo"),
         ]
-        return self._exportar(columnas, filas, "trabajadores", formato)
+        nombre = {"con": "trabajadores_con_rostro", "sin": "trabajadores_sin_rostro"}.get(
+            rostro, "trabajadores")
+        return self._exportar(columnas, filas, nombre, formato)
 
     # ── Dashboard (JSON, no archivo) ───────────────────────────────────────────
     def _tz_empresa(self, db: Session, id_empresa: int | None) -> ZoneInfo:
@@ -393,7 +452,7 @@ class ReporteService:
         q_inc = _emp(q_inc, Incidencia.id_empresa)
         incidencias_pend = q_inc.scalar() or 0
 
-        # Padrón con/sin rostro (embeddings; reports no tiene modelo Embedding → SQL crudo).
+        # Padrón con/sin rostro (conteo por SQL crudo sobre embeddings).
         sql_cr = ("SELECT count(DISTINCT e.id_trabajador) FROM embeddings e "
                   "JOIN trabajadores t ON t.id_trabajador = e.id_trabajador "
                   "WHERE t.estado='activo'")

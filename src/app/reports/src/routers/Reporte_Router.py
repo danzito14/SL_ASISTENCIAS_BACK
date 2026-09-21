@@ -13,6 +13,8 @@ from src.services.Reporte_Service import reporte_service
 router = APIRouter(prefix="/reportes", tags=["Reportes"])
 
 Formato = Literal["xlsx", "csv"]
+TipoRegistro = Literal["entrada", "salida"]
+Rostro = Literal["con", "sin"]
 
 
 # ── Dashboard (JSON con los números del día) ──────────────────────────────────
@@ -56,7 +58,8 @@ _FILE_RESPONSES = {
 @router.get(
     "/asistencias",
     summary="Reporte de asistencias (XLSX/CSV)",
-    description="Descarga las asistencias de tu empresa en el rango de fechas dado.",
+    description="Descarga las asistencias de tu empresa en el rango de fechas dado, con el "
+                "N° de empleado de SYS21 y la fecha y hora (locales) en columnas separadas.",
     responses=_FILE_RESPONSES,
 )
 def reporte_asistencias(
@@ -64,11 +67,12 @@ def reporte_asistencias(
     fecha_inicio: date | None = Query(None, description="YYYY-MM-DD"),
     fecha_fin: date | None = Query(None, description="YYYY-MM-DD (inclusivo)"),
     id_trabajador: int | None = Query(None, description="Asistencias de un empleado específico."),
+    tipo: TipoRegistro | None = Query(None, description="Solo entradas o solo salidas. Vacío = ambas."),
     id_empresa: int | None = Depends(resolver_empresa_scope),
     db: Session = Depends(get_db),
 ):
     return reporte_service.asistencias(
-        db, id_empresa, fecha_inicio, fecha_fin, formato, id_trabajador=id_trabajador
+        db, id_empresa, fecha_inicio, fecha_fin, formato, id_trabajador=id_trabajador, tipo=tipo
     )
 
 
@@ -176,12 +180,14 @@ def reporte_intentos(
 @router.get(
     "/trabajadores",
     summary="Reporte de trabajadores (XLSX/CSV)",
-    description="Descarga el padrón de trabajadores de tu empresa.",
+    description="Descarga el padrón de trabajadores de tu empresa, con su N° de empleado "
+                "de SYS21 y si tienen rostro registrado.",
     responses=_FILE_RESPONSES,
 )
 def reporte_trabajadores(
     formato: Formato = Query("xlsx"),
+    rostro: Rostro | None = Query(None, description="'con' = solo con rostro; 'sin' = solo sin rostro. Vacío = todos."),
     id_empresa: int | None = Depends(resolver_empresa_scope),
     db: Session = Depends(get_db),
 ):
-    return reporte_service.trabajadores(db, id_empresa, formato)
+    return reporte_service.trabajadores(db, id_empresa, formato, rostro=rostro)

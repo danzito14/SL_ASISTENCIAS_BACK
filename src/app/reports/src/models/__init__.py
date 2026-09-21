@@ -4,5 +4,8 @@ from src.models.Asistencia_HistorialAuditoria_Model import Asistencia
 from src.models.Incidencia_Model import Incidencia
 from src.models.IntentoAcceso_Model import IntentoAcceso
 from src.models.Empresa_Model import Empresa
+from src.models.Puerta_Model import PuertaAcceso
+from src.models.Embedding_Model import Embedding
 
-__all__ = ["AreaTrabajo", "Trabajador", "Asistencia", "Incidencia", "IntentoAcceso", "Empresa"]
+__all__ = ["AreaTrabajo", "Trabajador", "Asistencia", "Incidencia", "IntentoAcceso", "Empresa",
+           "PuertaAcceso", "Embedding"]
