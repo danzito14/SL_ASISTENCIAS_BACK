@@ -16,6 +16,7 @@ class Trabajador(Base):
     __tablename__ = "trabajadores"
     id_trabajador = Column(Integer, primary_key=True)
     id_emp        = Column(String(50))   # número de empleado externo (SYS21), para mostrar
+    origen_nomina = Column(String(30))   # agricola | agricola_com | apk (desambigua id_emp)
     nombre        = Column(String(100))
     apellido      = Column(String(100))
     id_area       = Column(Integer)
