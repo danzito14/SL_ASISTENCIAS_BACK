@@ -60,6 +60,19 @@ def _pendiente_de_sync():
     return null() if settings.MODO_KIOSKO else None
 
 
+def _marca_cliente(cuando: datetime | None = None):
+    """Valor de 'creado_en_cliente' al crear una fila.
+
+    En MODO_KIOSKO es OBLIGATORIO: la ingesta offline de la nube RECHAZA la asistencia
+    sin este campo (campos_obligatorios_faltantes) y deriva de él el DIA del fichaje,
+    que es lo que hace correcta la consolidacion de un lote subido tarde. Fuera del
+    kiosko no aplica: el registro nace en la nube, no en un cliente.
+    """
+    if not settings.MODO_KIOSKO:
+        return None
+    return cuando or datetime.now(timezone.utc)
+
+
 class ScannerService:
 
     # ── Destino / ubicación (vía facade de tenancy) ────────────────────────────
@@ -140,6 +153,7 @@ class ScannerService:
             id_trabajador=id_trabajador,
             similitud=round(similitud, 3) if similitud is not None else None,
             sincronizado_en=_pendiente_de_sync(),
+            creado_en_cliente=_marca_cliente(),
         )
         try:
             db.add(intento)
@@ -233,6 +247,7 @@ class ScannerService:
                          id_dispositivo_origen: int | None = None) -> ScanResponse:
         trab = res["trabajador"]  # {id_trabajador, nombre, apellido, id_empresa, similitud}
         similitud = trab["similitud"]
+        ahora = datetime.now(timezone.utc)
         escaneo = Escaneo(
             id_trabajador=trab["id_trabajador"],
             id_puerta=id_puerta,
@@ -240,12 +255,13 @@ class ScannerService:
             id_dispositivo=id_dispositivo,
             id_dispositivo_origen=id_dispositivo_origen,
             tipo_registro=tipo_registro,
-            fecha_hora=datetime.now(timezone.utc),
+            fecha_hora=ahora,
             confianza_biometrica=round(similitud, 2),
             estado_registro="exitoso",
             observaciones=observaciones,
             ubicacion=self._resolver_ubicacion(latitud, longitud, id_puerta, db),
             sincronizado_en=_pendiente_de_sync(),
+            creado_en_cliente=_marca_cliente(ahora),   # mismo instante que fecha_hora
         )
         escaneo = self._registrar_escaneo(escaneo, db)
         # En el kiosko el escaneo solo se ENCOLA: la nube valida y consolida al recibirlo

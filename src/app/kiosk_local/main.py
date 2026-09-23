@@ -47,9 +47,34 @@ async def lifespan(app: FastAPI):
         # Foto de evidencia (recorte JPEG) en cola de subida a media. Se limpia (NULL)
         # una vez subida. Columna kiosk-only (la nube guarda la foto en 'media', no aquí).
         db.execute(text("ALTER TABLE intentos_acceso ADD COLUMN IF NOT EXISTS foto_bytes BYTEA"))
+        # Lo mismo para los escaneos: hasta ahora un rechazo de la nube se marcaba como
+        # subido y el fichaje se perdía en silencio. Con esta columna se aparta igual.
+        db.execute(text("ALTER TABLE escaneos ADD COLUMN IF NOT EXISTS "
+                        "sync_rechazado BOOLEAN NOT NULL DEFAULT FALSE"))
         db.commit()
     except Exception as exc:
         logger.warning("kiosk_local: no se pudo asegurar la columna sync_rechazado: %s", exc)
+    try:
+        # REPARACION (idempotente): el escaner en modo kiosko no llenaba creado_en_cliente,
+        # y la ingesta de la nube RECHAZA la asistencia sin ese campo. Esas filas quedaron
+        # marcadas como sincronizadas sin haber llegado nunca. Se rellena con fecha_hora (el
+        # instante real del fichaje) y se re-encolan: subirlas de nuevo es idempotente
+        # (id_escaneo UUID + ON CONFLICT DO NOTHING), asi que lo ya ingerido no se duplica.
+        # Tras el fix del back nacen con el campo lleno, asi que esto deja de encontrar filas.
+        n = db.execute(text("""
+            UPDATE escaneos
+               SET creado_en_cliente = fecha_hora,
+                   sincronizado_en   = NULL,
+                   sync_rechazado    = FALSE
+             WHERE creado_en_cliente IS NULL
+        """)).rowcount
+        db.commit()
+        if n:
+            logger.warning("kiosk_local: %d escaneos sin creado_en_cliente reparados y "
+                           "re-encolados para subir a la nube.", n)
+    except Exception as exc:
+        db.rollback()
+        logger.error("kiosk_local: no se pudieron reparar los escaneos sin creado_en_cliente: %s", exc)
     try:
         tok = meta.leer(db, "cloud_token")
         if tok:
