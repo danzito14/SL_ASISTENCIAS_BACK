@@ -79,6 +79,12 @@ class TrabajadorUpdate(BaseModel):
     estado:   EstadoTrabajador | None = None
     permiso_escaneo: PermisoEscaneo | None = None
     nivel_acceso_interno: NivelAccesoInterno | None = None
+    # Número de empleado externo (nómina SYS21). Normalmente lo pobla el sync, pero
+    # se permite corregirlo a mano cuando el número en SYS cambió (ej. 100219 → 20417).
+    # OJO: si el trabajador viene de SYS21, cambiarlo aquí no cambia SYS21; en la
+    # siguiente corrida el sync casa por (id_emp, origen_nomina), así que el nuevo
+    # número debe coincidir con el que tenga SYS21.
+    id_emp: str | None = None
 
 
 class TrabajadorResponse(TrabajadorBase):
@@ -117,3 +123,40 @@ class TrabajadorRegistroResponse(BaseModel):
     mensaje: str = "Trabajador registrado correctamente."
 
     model_config = {"from_attributes": True}
+
+
+# ── Limpieza de duplicados ────────────────────────────────────────────────────
+class TrabajadorDuplicadoInfo(BaseModel):
+    """Ficha mínima de un trabajador dentro de un grupo de homónimos."""
+    id_trabajador:  int
+    id_emp:         str | None = None
+    origen_nomina:  str | None = None
+    nombre:         str
+    apellido:       str
+    id_empresa:     int | None = None
+    tiene_embedding: bool = False
+
+
+class DuplicadoNoEliminado(BaseModel):
+    """Duplicado que no se pudo borrar (tiene FK dependientes)."""
+    id_trabajador: int
+    nombre:        str
+    apellido:      str
+    motivo:        str
+
+
+class GrupoDuplicados(BaseModel):
+    """Un grupo de homónimos: el que se conserva y los que se (van a) eliminar."""
+    nombre_clave: str  # nombre normalizado, sin acentos ni numeral romano
+    conservado:   TrabajadorDuplicadoInfo
+    eliminados:   list[TrabajadorDuplicadoInfo]
+
+
+class LimpiezaDuplicadosResponse(BaseModel):
+    """Resultado del limpiador de duplicados (o su simulación)."""
+    simulado:              bool
+    grupos_con_duplicados: int
+    duplicados_detectados: int
+    eliminados:            int  # 0 en modo simulación
+    no_eliminados:         list[DuplicadoNoEliminado]
+    detalle:               list[GrupoDuplicados]

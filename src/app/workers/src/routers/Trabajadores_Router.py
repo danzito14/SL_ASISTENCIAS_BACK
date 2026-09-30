@@ -2,12 +2,13 @@
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
 from sqlalchemy.orm import Session
 
-from src.core.auth import exigir_empresa, resolver_empresa_scope, usuario_actual
+from src.core.auth import es_admin, exigir_empresa, resolver_empresa_scope, usuario_actual
 from src.core.pgdb import get_db
 from src.models.AreaTrabajo_Trabajador_Model import Trabajador
 from src.core.auth import Principal as Usuario
 from src.models.Embedding_Model import Embedding, VECTOR_DIM
 from src.schemas.AreaTrabajo_Trabajador import (
+    LimpiezaDuplicadosResponse,
     TrabajadorCreate,
     TrabajadorRegistroResponse,
     TrabajadorResponse,
@@ -86,6 +87,35 @@ def buscar_trabajadores(
     return trabajador_service.buscar_por_id_emp(
         db=db, id_emp=id_emp, skip=skip, limit=limit, id_empresa=id_empresa
     )
+
+
+# ── Limpiar trabajadores duplicados por nombre ────────────────────────────────
+# NOTA: declarado ANTES de "/{id_trabajador}" para que la ruta no se interprete
+# como un id. Solo super-admin: es una operación destructiva y cruza empresas.
+@router.post(
+    "/limpiar-duplicados",
+    response_model=LimpiezaDuplicadosResponse,
+    summary="Limpiar trabajadores duplicados por nombre",
+    description=(
+        "Detecta trabajadores ACTIVOS con el mismo nombre —ignorando acentos y el "
+        "sufijo romano I..V (p.ej. 'Juan Pérez' == 'JUAN PEREZ III')— y, por grupo, "
+        "conserva uno y BORRA TOTALMENTE el resto. Cruza orígenes: si el nombre está "
+        "en la nómina comercial y en la agrícola, conserva la comercial. Por defecto "
+        "SIMULA (no borra): manda 'simular=false' para aplicar. Los duplicados con "
+        "asistencias/escaneos/incidencias no se borran (se reportan). Solo super-admin."
+    ),
+)
+def limpiar_duplicados(
+    simular: bool = Query(True, description="true = solo simula (no borra); false = aplica el borrado."),
+    db: Session = Depends(get_db),
+    usuario: Usuario = Depends(usuario_actual),
+):
+    if not es_admin(usuario):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Solo el super-admin puede limpiar duplicados (cruza empresas).",
+        )
+    return trabajador_service.limpiar_duplicados(db=db, simular=simular)
 
 
 # ── Obtener trabajador por id ─────────────────────────────────────────────────
