@@ -67,6 +67,12 @@ class Settings(BaseSettings):
     SYNC_COM_TEST_INTERVAL_MIN: int = 0
     SYNC_BATCH_SIZE:       int = 500               # tamaño de lote de upsert
     SYNC_RECOG_CONCURRENCY: int = 4                # llamadas paralelas a recognition
+    # Fantasmas (solo agrícola; comercial se toma tal cual con fecha_baja IS NULL):
+    # activos en nómina sin días trabajados en ViewBI en las últimas N semanas NO se
+    # sincronizan (y si ya existían, quedan inactivos). Se respeta a los de nuevo
+    # ingreso (fecha_ingreso dentro de los últimos N días).
+    SYNC_FANTASMA_SEMANAS:   int = 4
+    SYNC_NUEVO_INGRESO_DIAS: int = 14
 
     # JWT — employee_monitoring NO emite ni valida tokens; el gateway valida el JWT.
     JWT_SECRET: str | None = os.getenv("JWT_SECRET")

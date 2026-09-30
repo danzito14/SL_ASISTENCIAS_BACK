@@ -131,6 +131,10 @@ GRANT USAGE, SELECT ON SEQUENCE
     sync_estado_id_sync_seq,
     fotos_pendientes_id_pendiente_seq
     TO svc_workers;
+-- El clasificador del sync crea el área estándar (campo/empaque/oficina) si la
+-- empresa no la tiene. Solo INSERT (actualizar/borrar áreas sigue siendo de tenancy).
+GRANT INSERT ON area_trabajo TO svc_workers;
+GRANT USAGE, SELECT ON SEQUENCE area_trabajo_id_area_seq TO svc_workers;
 
 
 -- ════════════════════════════════════════════════════════════════════════════

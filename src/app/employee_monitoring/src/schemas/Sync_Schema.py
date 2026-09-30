@@ -11,10 +11,12 @@ class SyncOrigenResultado(BaseModel):
     nuevos:          int = 0
     actualizados:    int = 0
     sin_cambio:      int = 0
+    omitidos:        int = 0             # homónimos omitidos (duplicados por nombre)
     fotos_ok:        int = 0
     fotos_pendientes: int = 0
     desaparecidos:   int = 0
     errores:         int = 0
+    areas_creadas:   list[str] = []       # áreas ("empresa: nombre") que creó el clasificador
     ok:              bool = True          # False si el origen falló (ej. sin conexión)
     detalle_error:   str | None = None
 
@@ -30,6 +32,7 @@ class SyncRunResponse(BaseModel):
     nuevos:          int = 0
     actualizados:    int = 0
     sin_cambio:      int = 0
+    omitidos:        int = 0             # homónimos omitidos (duplicados por nombre)
     fotos_ok:        int = 0
     fotos_pendientes: int = 0
     desaparecidos:   int = 0
