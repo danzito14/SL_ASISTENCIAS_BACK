@@ -135,6 +135,10 @@ GRANT USAGE, SELECT ON SEQUENCE
 -- empresa no la tiene. Solo INSERT (actualizar/borrar áreas sigue siendo de tenancy).
 GRANT INSERT ON area_trabajo TO svc_workers;
 GRANT USAGE, SELECT ON SEQUENCE area_trabajo_id_area_seq TO svc_workers;
+-- Reglas de clasificación (puesto/departamento → grupo): las lee el sync y se
+-- administran por API (/emp_sync/reglas).
+GRANT SELECT, INSERT, UPDATE, DELETE ON reglas_clasificacion TO svc_workers;
+GRANT USAGE, SELECT ON SEQUENCE reglas_clasificacion_id_regla_seq TO svc_workers;
 
 
 -- ════════════════════════════════════════════════════════════════════════════

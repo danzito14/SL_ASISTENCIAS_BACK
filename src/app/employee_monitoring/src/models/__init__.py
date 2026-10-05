@@ -3,5 +3,7 @@ from src.models.AreaTrabajo_Trabajador_Model import AreaTrabajo, Trabajador
 from src.models.Embedding_Model import Embedding
 from src.models.SyncEstado_Model import SyncEstado
 from src.models.FotoPendiente_Model import FotoPendiente
+from src.models.ReglaClasificacion_Model import ReglaClasificacion
 
-__all__ = ["AreaTrabajo", "Trabajador", "Embedding", "SyncEstado", "FotoPendiente"]
+__all__ = ["AreaTrabajo", "Trabajador", "Embedding", "SyncEstado", "FotoPendiente",
+           "ReglaClasificacion"]

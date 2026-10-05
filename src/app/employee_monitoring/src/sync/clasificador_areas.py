@@ -7,9 +7,11 @@ Modelo: cada empresa tiene 3 áreas locales (area_trabajo) marcadas con
 (agrícola) de la nómina se mapea a uno de esos 3 grupos; de ahí salen el área
 local (por (id_empresa, tipo_area)), el permiso_escaneo y el nivel_acceso_interno.
 
-Estado:
-  - COM (agricola_com): mapeo por DEPARTAMENTO (columna AREA, texto) → GRUPO_POR_DEPARTAMENTO_COM.
-  - Agrícola (agricola): por PUESTO (ViewBI_Puestos) → GRUPO_POR_PUESTO_AGRICOLA.
+Reglas: tabla `reglas_clasificacion` (se administran por API en /emp_sync/reglas y
+se releen en cada corrida). Por origen:
+  - COM (agricola_com): por DEPARTAMENTO (columna AREA, texto).
+  - Agrícola (agricola): por PUESTO (ViewBI_Puestos).
+Cada regla puede reemplazar el permiso_escaneo / nivel_acceso_interno del grupo.
   - empresa_origen de la nómina = id_empresa local (mismo número).
   - Si la empresa existe pero no tiene el área de ese tipo, se CREA (ver _crear_area).
     Si la empresa no existe en local, el empleado se rechaza (empresa_no_registrada).
@@ -23,6 +25,7 @@ from sqlalchemy.orm import Session
 
 from src.core.config import settings
 from src.models.AreaTrabajo_Trabajador_Model import AreaTrabajo
+from src.models.ReglaClasificacion_Model import ReglaClasificacion
 
 logger = logging.getLogger(__name__)
 
@@ -42,142 +45,10 @@ PERMISO_POR_GRUPO: dict[str, tuple[str, str | None]] = {
     "empaque": ("general", "empaque"),
     "campo":   ("campo", None),
 }
-
-# ── COM: departamento (AREA, texto) → grupo. Claves NORMALIZADAS (sin acentos). ─
-GRUPO_POR_DEPARTAMENTO_COM: dict[str, str] = {
-    # oficina
-    "administracion": "oficina",
-    "compras": "oficina",
-    "rrhh y nominas": "oficina",
-    "sistemas": "oficina",
-    "administracion sl": "oficina",
-    "servicios administrativos sl": "oficina",
-    "ventas": "oficina",
-    "gasolina fija": "oficina",
-    "practicantes": "oficina",
-    "gasolina": "oficina",
-    "administracion alpine": "oficina",
-    "logistica": "oficina",
-    "inocuidad": "oficina",
-    "seguridad e intendencia": "oficina",
-    "mantenimiento y equipo de transporte": "oficina",
-    # campo
-    "campo abierto": "campo",
-    "campo protegido": "campo",
-    "campo": "campo",
-    "fijos caco sinaloa": "campo",
-    "fijos caco jalisco": "campo",
-    "fijos produce": "campo",
-    "huerta de mango": "campo",
-    "todos santos": "campo",
-    # empaque
-    "almacen": "empaque",
-    "empaque ejote": "empaque",
-    "albergues": "empaque",
-    "empaque chile": "empaque",
-    "empaque": "empaque",
-    "fijos no fijos planta sl": "empaque",
-    "fijo empacadora": "empaque",
-    "emapque": "empaque",                 # typo de 'empaque' visto en SYS21
-    # Variantes vistas en SYS21 (area_invalida):
-    "mango": "campo",                     # (dict tenía 'huerta de mango')
-    "todo santos fijos": "campo",         # (dict tenía 'todos santos')
-    "gasolina fija caco": "oficina",      # (dict tenía 'gasolina fija')
-    "cat malacon": "oficina",             # provisional: en administración por el momento
-}
-
-# Overrides puntuales por departamento (sobre el default del grupo). Clave NORMALIZADA.
-OVERRIDE_POR_DEPARTAMENTO_COM: dict[str, dict] = {
-    # 'Fijos no fijos planta SL' es empaque pero con acceso interno MIXTO.
-    "fijos no fijos planta sl": {"nivel_acceso_interno": "mixto"},
-    # TODO (afinar): "administradores" → permiso 'super' por default. Falta definir
-    # qué departamentos/puestos cuentan como administradores (hoy oficina = 'general').
-}
-
-# ── Agrícola: PUESTO (ViewBI_Puestos.nombre) → grupo. Claves NORMALIZADAS. ──────
-GRUPO_POR_PUESTO_AGRICOLA: dict[str, str] = {
-    # oficina (administrativo)
-    "administrativo": "oficina",
-    "auxiliar administrativo": "oficina",
-    "administracion": "oficina",
-    "auxiliar-sistemas": "oficina",
-    "auxiliar nominas": "oficina",
-    "aux. de nomina": "oficina",
-    "aux contable": "oficina",
-    "auxiliar imss (prefiliar)": "oficina",
-    "seguridad y salud": "oficina",
-    "trabajadora social": "oficina",
-    "trabajador social aux": "oficina",
-    "mensajero": "oficina",
-    "asesora educativa": "oficina",
-    "practicante": "oficina",
-    "monitoreo": "oficina",
-    "aux inocuidad": "oficina",
-    "auxiliar compras": "oficina",
-    # empaque
-    "empaque": "empaque",
-    "almacen empaque": "empaque",
-    "montacarguista almacen": "empaque",
-    "guardia empaque": "empaque",
-    "escaneador": "empaque",
-    # Ambiguo (lo dejó el usuario en empaque): si su función es revisar producto
-    # ANTES de empaque → empaque; si no, debería ir en campo.
-    "revisador caco campo": "empaque",
-    "vaciadores": "empaque",
-    # campo
-    "jornalero": "campo",
-    "cuadrillero": "campo",
-    "chofer": "campo",
-    "mantenimiento": "campo",
-    "produccion": "campo",
-    "operador": "campo",
-    "mayordomo": "campo",
-    "apuntador": "campo",
-    "campero": "campo",
-    "malleros": "campo",
-    "ninera": "campo",
-    "cocinera": "campo",
-    "portero": "campo",
-    "campo": "campo",
-    "auxiliar de corte": "campo",
-    "supervisor corte-chile": "campo",
-    "jardinero": "campo",
-    "mantenimiento albergue": "campo",
-    "mantenimiento electrico": "campo",
-    "supervisor campo natoches": "campo",
-    "guardia": "campo",
-    "aux. mantenimiento": "campo",
-    "enc de motor de riego carcamo": "campo",
-    "carcamo riego": "campo",
-    "caco-velador": "campo",
-    "fuguero caco campo": "campo",
-    "canalero": "campo",
-    "enc. de sistemas de riego": "campo",
-    "aplicador de herbicida": "campo",
-    "aux. de riego": "campo",
-    "monitoreo caco campo": "campo",
-    "aplicador de fungicida": "campo",
-    "sanquero": "campo",
-    # Variantes/typos vistos en SYS21 (area_invalida): normalizados a mano.
-    "supervisor campo viva organica": "campo",
-    "spervisor corte-chile": "campo",     # typo en la fuente (falta la 'U')
-    "caco- velador": "campo",             # variante con espacio de 'caco-velador'
-    "fuguero agropotato": "campo",
-}
-OVERRIDE_POR_PUESTO_AGRICOLA: dict[str, dict] = {}
-
-# Mapa de reglas por origen.
-_MAPA_GRUPO_POR_ORIGEN = {
-    "agricola_com": GRUPO_POR_DEPARTAMENTO_COM,
-    "agricola": GRUPO_POR_PUESTO_AGRICOLA,
-}
-_OVERRIDE_POR_ORIGEN = {
-    "agricola_com": OVERRIDE_POR_DEPARTAMENTO_COM,
-    "agricola": OVERRIDE_POR_PUESTO_AGRICOLA,
-}
+GRUPOS = tuple(PERMISO_POR_GRUPO)
 
 
-def _normalizar(texto: str | None) -> str:
+def normalizar(texto: str | None) -> str:
     """Minúsculas, sin acentos, espacios colapsados (para empatar nombres robustos)."""
     if not texto:
         return ""
@@ -207,6 +78,13 @@ class _AreaLocal:
     id_empresa: int
 
 
+@dataclass(frozen=True)
+class _Regla:
+    grupo: str
+    permiso_escaneo: str | None       # None = default del grupo
+    nivel_acceso_interno: str | None  # None = default del grupo
+
+
 class ClasificacionAreas:
     """
     Índice de áreas locales por (id_empresa, tipo_area) + empresas locales activas.
@@ -217,22 +95,27 @@ class ClasificacionAreas:
     """
 
     def __init__(self, db: Session, areas: dict[tuple[int, str], _AreaLocal],
-                 empresas: dict[int, str]) -> None:
+                 empresas: dict[int, str], reglas: dict[tuple[str, str], _Regla]) -> None:
         self._db = db
         self._idx = areas
         self._empresas = empresas
+        self._reglas = reglas
         self._no_disponibles: set[tuple[int, str]] = set()
         self.areas_creadas: list[str] = []
 
     @classmethod
     def construir(cls, db: Session) -> "ClasificacionAreas":
-        """Carga las áreas ACTIVAS con tipo_area y las empresas ACTIVAS (menos la admin)."""
+        """Carga las reglas, las áreas ACTIVAS con tipo_area y las empresas ACTIVAS (menos la admin)."""
+        reglas = {
+            (r.origen_nomina, r.clave): _Regla(r.grupo, r.permiso_escaneo, r.nivel_acceso_interno)
+            for r in db.query(ReglaClasificacion).all()
+        }
         areas = (
             db.query(AreaTrabajo)
             .filter(AreaTrabajo.estado == "activo", AreaTrabajo.tipo_area.isnot(None))
             .all()
         )
-        idx = {(a.id_empresa, _normalizar(a.tipo_area)): _AreaLocal(a.id_area, a.id_empresa)
+        idx = {(a.id_empresa, normalizar(a.tipo_area)): _AreaLocal(a.id_area, a.id_empresa)
                for a in areas}
         empresas = {
             f.id_empresa: f.nombre_empresa
@@ -241,9 +124,9 @@ class ClasificacionAreas:
             ))
             if f.id_empresa != settings.EMPRESA_ADMIN
         }
-        logger.info("Clasificador: %d áreas locales (empresa, tipo) y %d empresas.",
-                    len(idx), len(empresas))
-        return cls(db, idx, empresas)
+        logger.info("Clasificador: %d reglas, %d áreas locales (empresa, tipo) y %d empresas.",
+                    len(reglas), len(idx), len(empresas))
+        return cls(db, idx, empresas, reglas)
 
     def clasificar(
         self,
@@ -258,11 +141,10 @@ class ClasificacionAreas:
           - MOTIVO_EMPRESA_NO_REGISTRADA: la empresa no existe (o está inactiva) en local.
           - MOTIVO_AREA_NO_DISPONIBLE:    faltaba el área y no se pudo crear.
         """
-        mapa = _MAPA_GRUPO_POR_ORIGEN.get(origen, {})
-        clave = _normalizar(area_nombre)
-        grupo = mapa.get(clave)
-        if grupo is None:
+        regla = self._reglas.get((origen, normalizar(area_nombre)))
+        if regla is None:
             return None, MOTIVO_SIN_REGLA
+        grupo = regla.grupo
 
         try:
             id_empresa = int(empresa_origen)
@@ -276,9 +158,8 @@ class ClasificacionAreas:
             return None, MOTIVO_AREA_NO_DISPONIBLE
 
         permiso, nivel = PERMISO_POR_GRUPO[grupo]
-        override = _OVERRIDE_POR_ORIGEN.get(origen, {}).get(clave, {})
-        permiso = override.get("permiso_escaneo", permiso)
-        nivel = override.get("nivel_acceso_interno", nivel)
+        permiso = regla.permiso_escaneo or permiso
+        nivel = regla.nivel_acceso_interno or nivel
 
         return AreaClasificada(
             id_area=area_local.id_area,
@@ -311,7 +192,7 @@ class ClasificacionAreas:
                 WHERE id_empresa = :id_empresa AND nombre_area = :nombre
             """), {"id_empresa": id_empresa, "nombre": nombre}).first()
             if existente is None or existente.estado != "activo" \
-                    or _normalizar(existente.tipo_area) != grupo:
+                    or normalizar(existente.tipo_area) != grupo:
                 logger.warning("Clasificador: no se pudo usar/crear el área '%s' (empresa %s).",
                                nombre, id_empresa)
                 self._no_disponibles.add((id_empresa, grupo))

@@ -24,7 +24,7 @@ from sqlalchemy.orm import Session
 
 from src.core.config import settings
 from src.models.Embedding_Model import Embedding
-from src.models.FotoPendiente_Model import FotoPendiente
+from src.models.FotoPendiente_Model import MOTIVOS_MAPEO, FotoPendiente
 from src.models.SyncEstado_Model import SyncEstado
 from src.services.Bulk_Service import bulk_service
 from src.services.Embedding_Service import embedding_service
@@ -167,11 +167,13 @@ class SyncService:
 
         # 1) Leer y mapear TODA la nómina (los inválidos van a pendientes).
         crudos: list[mapping.TrabajadorMapeado] = []
+        no_mapeados: set[str] = set()
         for fila in sys21_reader.leer_empleados(origen):
             r.leidos += 1
             mapeado, motivo = mapping.mapear_fila(fila, clasificacion)
             if mapeado is None:
                 r.errores += 1
+                no_mapeados.add(str(fila.get("id_emp")))
                 self._registrar_pendiente(
                     db, str(fila.get("id_emp")), origen, None, None, motivo,
                     detalle=f"empresa={fila.get('empresa_origen')} "
@@ -179,6 +181,11 @@ class SyncService:
                 )
                 continue
             crudos.append(mapeado)
+
+        # Los rechazos de mapeo de corridas anteriores que YA no fallan (se agregó su
+        # regla/área, o ya no están en la nómina) se cierran: así /emp_sync/reglas/sin-regla
+        # solo muestra lo que sigue pendiente.
+        self._resolver_pendientes_mapeo(db, origen, no_mapeados)
 
         # 2) Omitir homónimos para NO recrear duplicados: los que ya están en una
         #    nómina de mayor prioridad (comercial > agrícola) y los 'II/III...' cuyo
@@ -494,6 +501,21 @@ class SyncService:
             )
             .values(estado="resuelto")
         )
+
+    def _resolver_pendientes_mapeo(self, db: Session, origen: str, siguen_fallando: set[str]) -> None:
+        """Cierra (resuelto) los rechazos de mapeo abiertos de quien ya no falla."""
+        stmt = (
+            update(FotoPendiente)
+            .where(
+                FotoPendiente.origen_nomina == origen,
+                FotoPendiente.estado == "pendiente",
+                FotoPendiente.motivo.in_(MOTIVOS_MAPEO),
+            )
+            .values(estado="resuelto")
+        )
+        if siguen_fallando:
+            stmt = stmt.where(FotoPendiente.id_emp.notin_(siguen_fallando))
+        db.execute(stmt)
 
     @staticmethod
     def _acumular(resumen: SyncRunResponse, r: SyncOrigenResultado) -> None:
