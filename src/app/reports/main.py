@@ -55,6 +55,8 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    # El front toma de aquí el nombre del archivo (Reporte_<tipo>_<empresa>_<fecha>).
+    expose_headers=["Content-Disposition"],
 )
 
 app.include_router(Router_Reporte)
