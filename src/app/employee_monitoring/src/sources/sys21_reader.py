@@ -7,11 +7,9 @@ de abajo para que mapping.py reciba siempre las mismas claves.
 
 Orígenes:
   - 'agricola'      → ASL_Nomina.dbo.ViewBI_Empleados (+ JOIN ViewBI_Puestos)
-                      filtro: inactivo = 0 y SIN fantasmas (trabajó en ViewBI en
-                      las últimas SYNC_FANTASMA_SEMANAS, o fecha_ingreso dentro de
-                      los últimos SYNC_NUEVO_INGRESO_DIAS)
+                      filtro: inactivo = 0
   - 'agricola_com'  → ASL_Nomina_COM.dbo.ViewBI_Com_Empleados
-                      filtro: estatus = 1   (activos; en COM no hay filtro de fantasmas)
+                      filtro: estatus = 1
 
 Como ambas consultas filtran a ACTIVOS en el WHERE, toda fila devuelta es vigente;
 los que desaparecen del resultado se inactivan por la fase de 'desaparecidos'.
@@ -21,7 +19,6 @@ from collections.abc import Iterator
 
 from sqlalchemy import text
 
-from src.core.config import settings
 from src.sources.sys21_engines import get_engine
 
 logger = logging.getLogger(__name__)
@@ -57,16 +54,6 @@ CONSULTAS: dict[str, str] = {
         FROM dbo.ViewBI_Empleados e
         LEFT JOIN dbo.ViewBI_Puestos p ON p.id = e.id_puesto
         WHERE e.inactivo = 0
-          -- Sin fantasmas: trabajó en las últimas N semanas, o es de nuevo ingreso.
-          AND (
-                e.fecha_ingreso >= DATEADD(DAY, -:dias_nuevo_ingreso, CAST(GETDATE() AS DATE))
-             OR EXISTS (
-                    SELECT 1
-                    FROM dbo.ViewBI v
-                    WHERE v.id_empleado = e.id_empleado
-                      AND v.Fecha >= DATEADD(WEEK, -:semanas_fantasma, CAST(GETDATE() AS DATE))
-                )
-          )
     """),
     # ── ASL_Nomina_COM (comercializadora) ────────────────────────────────────
     # AREA y NOMBRE_PUESTO vienen como texto; 'empresa' es numérico (como en agrícola).
@@ -88,16 +75,6 @@ CONSULTAS: dict[str, str] = {
 }
 
 
-def _parametros(origen: str) -> dict:
-    """Parámetros enlazados de la consulta de cada origen (solo agrícola filtra fantasmas)."""
-    if origen == "agricola":
-        return {
-            "semanas_fantasma": settings.SYNC_FANTASMA_SEMANAS,
-            "dias_nuevo_ingreso": settings.SYNC_NUEVO_INGRESO_DIAS,
-        }
-    return {}
-
-
 def leer_empleados(origen: str) -> Iterator[dict]:
     """
     Itera (streaming) los empleados ACTIVOS de un origen. Cada item es un dict con
@@ -109,7 +86,7 @@ def leer_empleados(origen: str) -> Iterator[dict]:
 
     engine = get_engine(origen)
     with engine.connect().execution_options(stream_results=True, yield_per=1000) as conn:
-        for fila in conn.execute(CONSULTAS[origen], _parametros(origen)).mappings():
+        for fila in conn.execute(CONSULTAS[origen]).mappings():
             id_emp = fila.get("id_emp")
             if id_emp is None or str(id_emp).strip() == "":
                 continue
