@@ -12,6 +12,7 @@ from src.core.config import settings
 from src.core.pgdb import engine
 from src.core.auth import guard_scopes, oauth2_scheme
 import src.models  # noqa: F401 — registra los modelos en el registry de Base
+from src.routers.Reglas_Router import router as Router_Reglas
 from src.routers.Sync_Router import router as Router_Sync
 from src.scheduler import detener_scheduler, iniciar_scheduler
 from src.sources.sys21_engines import probar_conexiones
@@ -77,6 +78,7 @@ app.add_middleware(
 )
 
 app.include_router(Router_Sync)
+app.include_router(Router_Reglas)
 
 
 @app.get("/health", tags=["Health"])

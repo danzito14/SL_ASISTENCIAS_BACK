@@ -5,8 +5,11 @@ Cada reporte se acota por la empresa del usuario (None = super-admin → todas).
 """
 import csv
 import io
+import re
+import unicodedata
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
+from pathlib import Path
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
@@ -24,6 +27,73 @@ from src.models.IntentoAcceso_Model import IntentoAcceso
 from src.models.Puerta_Model import PuertaAcceso
 
 XLSX_MEDIA = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+# Diseño del XLSX: fila 1 = logo (A1) + título (C1:D1) + rango (E1);
+# fila 2 = encabezados de una tabla de Excel; datos desde la fila 3.
+FILA_TITULO = 1
+FILA_ENCABEZADOS = 2
+ALTO_TITULO_PT = 67.8
+ANCHO_COL_LOGO = 24.9          # ancho de la columna A (caracteres)
+CAJA_LOGO_PX = (170, 82)       # el logo entra completo en esta caja (contain)
+ESTILO_TABLA = "TableStyleLight9"
+# Logos por empresa: assets/logos/logo_empresa_<id_empresa>.<ext> (mismos ids que
+# la tabla empresas). Sin logo propio (o "todas las empresas") → el de la empresa 1.
+LOGOS_DIR = Path(__file__).resolve().parents[2] / "assets" / "logos"
+LOGO_EXTS = (".png", ".jpg", ".jpeg", ".webp")
+ID_EMPRESA_LOGO_DEFAULT = 1
+_logos_cache: dict[int | None, tuple[bytes, int, int] | None] = {}
+
+
+def _ruta_logo(id_empresa: int) -> Path | None:
+    for ext in LOGO_EXTS:
+        ruta = LOGOS_DIR / f"logo_empresa_{id_empresa}{ext}"
+        if ruta.is_file():
+            return ruta
+    return None
+
+
+def _logo_empresa(id_empresa: int | None) -> tuple[bytes, int, int] | None:
+    """PNG del logo reducido a la caja del título → (bytes, ancho_px, alto_px)."""
+    if id_empresa in _logos_cache:
+        return _logos_cache[id_empresa]
+    res = None
+    ruta = (_ruta_logo(id_empresa) if id_empresa is not None else None) \
+        or _ruta_logo(ID_EMPRESA_LOGO_DEFAULT)
+    if ruta is not None:
+        try:
+            from PIL import Image as PILImage
+            with PILImage.open(ruta) as im:
+                im = im.convert("RGBA")
+                esc = min(CAJA_LOGO_PX[0] / im.width, CAJA_LOGO_PX[1] / im.height)
+                ancho, alto = max(1, round(im.width * esc)), max(1, round(im.height * esc))
+                # Se guarda al doble de resolución (nitidez) pero sin el peso del original.
+                im.thumbnail((ancho * 2, alto * 2))
+                buf = io.BytesIO()
+                im.save(buf, format="PNG", optimize=True)
+                res = (buf.getvalue(), ancho, alto)
+        except Exception:
+            res = None   # imagen inválida o sin Pillow: el reporte sale sin logo
+    _logos_cache[id_empresa] = res
+    return res
+
+
+_MESES = ("Ene", "Feb", "Mar", "Abr", "May", "Jun", "Jul", "Ago", "Sep", "Oct", "Nov", "Dic")
+# Razón social al final del nombre ("SA de CV", "S.A.", "S de RL de CV"...): no va en el archivo.
+_RAZON_SOCIAL = re.compile(
+    r"\s+S\.?\s?(A|DE\s+R\.?\s?L)\.?(\s+DE\s+C\.?\s?V\.?)?\s*$", re.IGNORECASE)
+
+
+def _slug_archivo(texto: str) -> str:
+    """'SL Agricola SA de CV' → 'SL_Agricola' (sin acentos ni símbolos, apto para nombre de archivo)."""
+    texto = _RAZON_SOCIAL.sub("", texto.strip())
+    texto = unicodedata.normalize("NFKD", texto).encode("ascii", "ignore").decode()
+    texto = re.sub(r"[^A-Za-z0-9]+", " ", texto)
+    return "_".join(texto.split())
+
+
+def _fecha_archivo(d: date) -> str:
+    """date(2026, 10, 7) → '07Oct2026'."""
+    return f"{d.day:02d}{_MESES[d.month - 1]}{d.year}"
 
 
 def _celda(v):
@@ -64,6 +134,69 @@ def _hasta_fin_de_dia(fecha_fin: date) -> datetime:
 
 class ReporteService:
 
+    # ── Título del XLSX ────────────────────────────────────────────────────────
+    def _titulo(
+        self, db: Session, id_empresa: int | None, titulo: str, tipo_archivo: str,
+        fecha_inicio: date | None = None, fecha_fin: date | None = None,
+    ) -> dict:
+        """
+        Datos del título: "<TITULO> DE <EMPRESA>" + "DEL <inicio> AL <fin>".
+        Sin fecha de inicio el rango queda "AL <fin>" (todo el histórico hasta 'fin');
+        sin fecha fin se usa el día de hoy.
+
+        También el nombre del archivo: Reporte_<tipo_archivo>_<Empresa>_<07Oct2026>
+        (fecha de descarga en la zona horaria de la empresa).
+        """
+        if id_empresa is None:
+            empresa = "Todas las empresas"
+        else:
+            fila = db.query(Empresa.nombre_empresa).filter(Empresa.id_empresa == id_empresa).first()
+            empresa = fila[0] if fila and fila[0] else f"Empresa {id_empresa}"
+        hoy = datetime.now(self._tz_empresa(db, id_empresa)).date()
+        fin = (fecha_fin or hoy).isoformat()
+        rango = f"DEL {fecha_inicio.isoformat()} AL {fin}" if fecha_inicio else f"AL {fin}"
+        return {
+            "texto": f"{titulo.upper()} DE {empresa.upper()}",
+            "rango": rango,
+            "logo": _logo_empresa(id_empresa),
+            "archivo": f"Reporte_{tipo_archivo}_{_slug_archivo(empresa)}_{_fecha_archivo(hoy)}",
+        }
+
+    def _escribir_titulo(self, ws, titulo: dict) -> None:
+        """Fila 1: logo (A1), título (C1:D1 combinadas) y rango de fechas (E1)."""
+        from openpyxl.styles import Alignment, Font
+
+        ws.row_dimensions[FILA_TITULO].height = ALTO_TITULO_PT
+        fuente = Font(bold=True, size=16)
+        c = ws.cell(row=FILA_TITULO, column=3, value=titulo["texto"])
+        c.font = fuente
+        c.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        ws.merge_cells(start_row=FILA_TITULO, start_column=3, end_row=FILA_TITULO, end_column=4)
+        c = ws.cell(row=FILA_TITULO, column=5, value=titulo["rango"])
+        c.font = fuente
+        c.alignment = Alignment(vertical="center")
+
+        if titulo["logo"] is None:
+            return
+        from openpyxl.drawing.image import Image
+        from openpyxl.drawing.spreadsheet_drawing import AnchorMarker, OneCellAnchor
+        from openpyxl.drawing.xdr import XDRPositiveSize2D
+        from openpyxl.utils.units import pixels_to_EMU
+
+        datos, ancho, alto = titulo["logo"]
+        img = Image(io.BytesIO(datos))
+        img.width, img.height = ancho, alto
+        # Centrado dentro de A1 (ancho de columna en px ≈ caracteres * 7 + 5).
+        caja_w = int(ANCHO_COL_LOGO * 7 + 5)
+        caja_h = int(ALTO_TITULO_PT * 96 / 72)
+        marca = AnchorMarker(
+            col=0, colOff=pixels_to_EMU(max(0, (caja_w - ancho) // 2)),
+            row=FILA_TITULO - 1, rowOff=pixels_to_EMU(max(0, (caja_h - alto) // 2)),
+        )
+        img.anchor = OneCellAnchor(
+            _from=marca, ext=XDRPositiveSize2D(pixels_to_EMU(ancho), pixels_to_EMU(alto)))
+        ws.add_image(img)
+
     # ── Exportador genérico ────────────────────────────────────────────────────
     def _exportar(
         self,
@@ -71,6 +204,8 @@ class ReporteService:
         filas: list[dict],
         nombre_base: str,
         formato: str,
+        titulo: dict | None = None,        # ver _titulo(); solo aplica al XLSX
+        colores: dict[str, dict[str, str]] | None = None,  # {clave: {valor: "RRGGBB"}} (XLSX)
     ) -> StreamingResponse:
         claves = [c[0] for c in columnas]
         encabezados = [c[1] for c in columnas]
@@ -93,12 +228,50 @@ class ReporteService:
                     status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                     detail="Falta la librería 'openpyxl' para exportar a XLSX (pip install openpyxl).",
                 )
+            from openpyxl.styles import PatternFill
+            from openpyxl.utils import get_column_letter
+            from openpyxl.worksheet.table import Table, TableStyleInfo
+
             wb = Workbook()
             ws = wb.active
             ws.title = nombre_base[:31]
-            ws.append(encabezados)
-            for f in filas:
-                ws.append([_celda(f.get(k)) for k in claves])
+            if titulo is not None:
+                self._escribir_titulo(ws, titulo)
+                fila_enc = FILA_ENCABEZADOS
+            else:
+                fila_enc = 1
+            for col, enc in enumerate(encabezados, start=1):
+                ws.cell(row=fila_enc, column=col, value=enc)
+            rellenos = {
+                k: {v: PatternFill("solid", fgColor=hexc) for v, hexc in mapa.items()}
+                for k, mapa in (colores or {}).items()
+            }
+            anchos = [len(str(e)) for e in encabezados]
+            for r, f in enumerate(filas, start=fila_enc + 1):
+                for col, k in enumerate(claves, start=1):
+                    v = _celda(f.get(k))
+                    celda = ws.cell(row=r, column=col, value=v)
+                    if k in rellenos and v in rellenos[k]:
+                        celda.fill = rellenos[k][v]
+                    anchos[col - 1] = max(anchos[col - 1], len(str(v)))
+            for col, ancho in enumerate(anchos, start=1):
+                ancho = min(max(ancho + 2, 8), 50)
+                if col == 1 and titulo is not None:
+                    ancho = max(ancho, ANCHO_COL_LOGO)   # cabe el logo
+                ws.column_dimensions[get_column_letter(col)].width = ancho
+
+            # Tabla de Excel (filtros + filas bandeadas). Necesita al menos una fila
+            # de datos: sin datos se deja una vacía bajo los encabezados.
+            ultima = fila_enc + max(len(filas), 1)
+            tabla = Table(
+                displayName="Reporte",
+                ref=f"A{fila_enc}:{get_column_letter(len(claves))}{ultima}",
+            )
+            tabla.tableStyleInfo = TableStyleInfo(
+                name=ESTILO_TABLA, showRowStripes=True, showColumnStripes=False,
+                showFirstColumn=False, showLastColumn=False,
+            )
+            ws.add_table(tabla)
             bio = io.BytesIO()
             wb.save(bio)
             data = bio.getvalue()
@@ -110,7 +283,7 @@ class ReporteService:
                 detail="El formato debe ser 'csv' o 'xlsx'.",
             )
 
-        nombre = f"{nombre_base}.{formato}"
+        nombre = f"{titulo['archivo'] if titulo else nombre_base}.{formato}"
         return StreamingResponse(
             io.BytesIO(data),
             media_type=media,
@@ -150,7 +323,6 @@ class ReporteService:
         for a, t, e, p in q.order_by(Asistencia.fecha_hora.desc()).all():
             local = _a_local(a.fecha_hora, e.zona_horaria if e else None, zonas)
             filas.append({
-                "id": a.id_asistencia,
                 "id_emp": t.id_emp,
                 "origen_nomina": t.origen_nomina,
                 "trabajador": f"{t.nombre} {t.apellido}",
@@ -159,20 +331,16 @@ class ReporteService:
                 "tipo": a.tipo_registro,
                 "fecha": local.date(),
                 "hora": local.strftime("%H:%M:%S"),
-                "confianza": a.confianza_biometrica,
-                "estado": a.estado_registro,
-                "dentro_de_area": _si_no(a.dentro_de_area),
-                "observaciones": a.observaciones,
             })
         columnas = [
-            ("id", "ID"), ("id_emp", "N° empleado"), ("origen_nomina", "Nómina"),
+            ("id_emp", "N° empleado"), ("origen_nomina", "Nómina"),
             ("trabajador", "Trabajador"), ("empresa", "Empresa"), ("puerta", "Puerta"),
             ("tipo", "Tipo"), ("fecha", "Fecha"), ("hora", "Hora"),
-            ("confianza", "Confianza"), ("estado", "Estado"),
-            ("dentro_de_area", "Dentro del área"), ("observaciones", "Observaciones"),
         ]
         nombre = {"entrada": "entradas", "salida": "salidas"}.get(tipo, "asistencias")
-        return self._exportar(columnas, filas, nombre, formato)
+        titulo = self._titulo(db, id_empresa, nombre, tipo or "asistencia", fecha_inicio, fecha_fin)
+        colores = {"tipo": {"entrada": "558ED5", "salida": "B3A2C7"}}
+        return self._exportar(columnas, filas, nombre, formato, titulo, colores)
 
     def incidencias(
         self, db: Session, id_empresa: int | None, fecha_inicio: date | None,
@@ -212,7 +380,11 @@ class ReporteService:
             ("fecha", "Fecha"), ("estado", "Estado"), ("descripcion", "Descripción"),
             ("escaneo_ref", "Escaneo (ID)"),
         ]
-        return self._exportar(columnas, filas, "incidencias", formato)
+        nombre_titulo = {"falta": "faltas", "fuera_de_area": "fuera de área"}.get(
+            tipo, f"incidencias ({tipo.replace('_', ' ')})" if tipo else "incidencias")
+        titulo = self._titulo(db, id_empresa, nombre_titulo, tipo or "incidencia",
+                              fecha_inicio, fecha_fin)
+        return self._exportar(columnas, filas, "incidencias", formato, titulo)
 
     def retardos(
         self, db: Session, id_empresa: int | None, fecha_inicio: date | None,
@@ -277,7 +449,8 @@ class ReporteService:
             ("fecha", "Fecha"), ("hora_esperada", "Hora esperada"),
             ("hora_real", "Hora real"), ("minutos_retardo", "Minutos de retardo"),
         ]
-        return self._exportar(columnas, filas, "retardos", formato)
+        titulo = self._titulo(db, id_empresa, "retardos", "retardo", fecha_inicio, fecha_fin)
+        return self._exportar(columnas, filas, "retardos", formato, titulo)
 
     def intentos(
         self, db: Session, id_empresa: int | None, fecha_inicio: date | None,
@@ -309,7 +482,9 @@ class ReporteService:
             ("puerta", "Puerta"), ("trabajador", "Trabajador (si aplica)"),
             ("similitud", "Similitud"),
         ]
-        return self._exportar(columnas, filas, "intentos_acceso", formato)
+        titulo = self._titulo(db, id_empresa, "intentos de acceso", "intento_acceso",
+                              fecha_inicio, fecha_fin)
+        return self._exportar(columnas, filas, "intentos_acceso", formato, titulo)
 
     def trabajadores(
         self, db: Session, id_empresa: int | None, formato: str,
@@ -364,7 +539,11 @@ class ReporteService:
         ]
         nombre = {"con": "trabajadores_con_rostro", "sin": "trabajadores_sin_rostro"}.get(
             rostro, "trabajadores")
-        return self._exportar(columnas, filas, nombre, formato)
+        tipo_archivo = {"con": "trabajador_con_rostro", "sin": "trabajador_sin_rostro"}.get(
+            rostro, "trabajador")
+        # padrón: sin rango → "AL <hoy>"
+        titulo = self._titulo(db, id_empresa, nombre.replace("_", " "), tipo_archivo)
+        return self._exportar(columnas, filas, nombre, formato, titulo)
 
     # ── Dashboard (JSON, no archivo) ───────────────────────────────────────────
     def _tz_empresa(self, db: Session, id_empresa: int | None) -> ZoneInfo:

@@ -9,7 +9,7 @@ Orígenes:
   - 'agricola'      → ASL_Nomina.dbo.ViewBI_Empleados (+ JOIN ViewBI_Puestos)
                       filtro: inactivo = 0
   - 'agricola_com'  → ASL_Nomina_COM.dbo.ViewBI_Com_Empleados
-                      filtro: fecha_baja IS NULL   (activos)
+                      filtro: estatus = 1
 
 Como ambas consultas filtran a ACTIVOS en el WHERE, toda fila devuelta es vigente;
 los que desaparecen del resultado se inactivan por la fase de 'desaparecidos'.
@@ -57,7 +57,8 @@ CONSULTAS: dict[str, str] = {
     """),
     # ── ASL_Nomina_COM (comercializadora) ────────────────────────────────────
     # AREA y NOMBRE_PUESTO vienen como texto; 'empresa' es numérico (como en agrícola).
-    # fecha_baja IS NULL = activo (confirmado: la versión 'IS NOT NULL' era un error).
+    # Activo = estatus = 1 (columna agregada a la vista en oct-2026; más estricta que
+    # fecha_baja IS NULL: deja fuera a los que no tienen baja pero ya no están).
     "agricola_com": text("""
         SELECT
             e.Numero             AS id_emp,
@@ -69,7 +70,7 @@ CONSULTAS: dict[str, str] = {
             e.AREA               AS area_nombre,
             e.NOMBRE_PUESTO      AS puesto
         FROM dbo.ViewBI_Com_Empleados e
-        WHERE e.fecha_baja IS NULL
+        WHERE e.estatus = 1
     """),
 }
 

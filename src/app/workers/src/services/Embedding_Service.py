@@ -137,7 +137,10 @@ class EmbeddingService:
                         misma persona puede estar legítimamente en empresas distintas).
 
         Returns:
-            {"id_trabajador": int, "similitud": float} si hay un duplicado, o None.
+            {"id_trabajador": int, "id_emp": str|None, "nombre": str, "apellido": str,
+             "similitud": float} si hay un duplicado, o None. id_emp es el número de
+            empleado (SYS21) —lo que el front muestra y con lo que se busca—; es NULL
+            en trabajadores creados a mano.
         """
         vector_str = "[" + ",".join(str(x) for x in embedding) + "]"
 
@@ -145,6 +148,9 @@ class EmbeddingService:
             text("""
                 SELECT
                     e.id_trabajador,
+                    t.id_emp,
+                    t.nombre,
+                    t.apellido,
                     1 - (e.vector_embedding <=> CAST(:vector AS vector)) AS similitud
                 FROM embeddings e
                 JOIN trabajadores t ON t.id_trabajador = e.id_trabajador
@@ -169,7 +175,13 @@ class EmbeddingService:
         if similitud < DUPLICADO_UMBRAL:
             return None
 
-        return {"id_trabajador": resultado.id_trabajador, "similitud": similitud}
+        return {
+            "id_trabajador": resultado.id_trabajador,
+            "id_emp": resultado.id_emp,
+            "nombre": resultado.nombre,
+            "apellido": resultado.apellido,
+            "similitud": similitud,
+        }
 
     def asegurar_no_duplicado(
         self,
@@ -181,11 +193,16 @@ class EmbeddingService:
         """Lanza 409 si la cara ya está registrada en otro trabajador. Si no, no hace nada."""
         dup = self.buscar_duplicado(embedding, db, excluir_id_trabajador, id_empresa)
         if dup is not None:
+            # Referir al dueño por su número de empleado (SYS21), que es con lo que se
+            # busca en el front. Cae al id interno solo si es un trabajador creado a
+            # mano (id_emp NULL).
+            ref = dup["id_emp"] or f"#{dup['id_trabajador']} (interno)"
+            nombre = f"{dup['nombre']} {dup['apellido']}".strip()
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail=(
-                    f"Esta cara ya está registrada en el trabajador "
-                    f"{dup['id_trabajador']} (similitud: {dup['similitud']:.2%}). "
+                    f"Esta cara ya está registrada en el trabajador {nombre} "
+                    f"(no. empleado {ref}, similitud: {dup['similitud']:.2%}). "
                     "No se puede registrar el mismo rostro en dos trabajadores."
                 ),
             )

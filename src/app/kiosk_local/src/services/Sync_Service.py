@@ -16,16 +16,21 @@ from src.services.Cloud_Client import cloud_client
 
 logger = logging.getLogger(__name__)
 
+# Pendientes = sin subir Y no rechazados por la nube (mismo criterio que los intentos:
+# sync_rechazado evita reintentar en bucle una fila que la nube rechaza fila-por-fila).
 _PENDIENTES = text("""
     SELECT id_escaneo, id_trabajador, id_puerta, id_empresa, tipo_registro,
            creado_en_cliente, confianza_biometrica, dentro_de_area, id_dispositivo_origen
     FROM escaneos
-    WHERE sincronizado_en IS NULL
+    WHERE sincronizado_en IS NULL AND NOT sync_rechazado
     ORDER BY fecha_creacion
     LIMIT :lim
 """)
 _MARCAR = text(
     "UPDATE escaneos SET sincronizado_en = NOW() WHERE id_escaneo IN :ids"
+).bindparams(bindparam("ids", expanding=True))
+_MARCAR_RECH = text(
+    "UPDATE escaneos SET sync_rechazado = TRUE WHERE id_escaneo IN :ids"
 ).bindparams(bindparam("ids", expanding=True))
 
 # Columnas EXACTAS que espera POST /off_sync/asistencias (id_asistencia = id_escaneo).
@@ -111,16 +116,24 @@ class SyncService:
             if not filas:
                 return {"pendientes": 0}
             resp = cloud_client.subir_asistencias(_csv(filas))     # lanza si no hay internet
-            ids = [str(f.id_escaneo) for f in filas]
-            db.execute(_MARCAR, {"ids": ids})                      # marca el lote como subido
-            db.commit()
             rech = resp.get("rechazados") or []
+            # Una fila RECHAZADA no llegó: marcarla como sincronizada la perdería para
+            # siempre (fue el bug que dejó 952 fichajes fuera de la nube). Se marca aparte.
+            rech_ids = {str(r["id"]) for r in rech if r.get("id")}
+            todos = [str(f.id_escaneo) for f in filas]
+            ok_ids = [i for i in todos if i not in rech_ids]       # insertados + duplicados
+            if ok_ids:
+                db.execute(_MARCAR, {"ids": ok_ids})
+            if rech_ids:
+                db.execute(_MARCAR_RECH, {"ids": list(rech_ids)})  # no reintentar en bucle
+            db.commit()
             logger.info("sync: subidos %d (insertados=%s duplicados=%s rechazados=%d)",
-                        len(ids), resp.get("insertados"), resp.get("duplicados"), len(rech))
-            if rech:
-                logger.warning("sync: la nube rechazó %d filas: %s", len(rech), rech[:5])
-            return {"subidos": len(ids), "insertados": resp.get("insertados"),
-                    "duplicados": resp.get("duplicados"), "rechazados": len(rech)}
+                        len(ok_ids), resp.get("insertados"), resp.get("duplicados"), len(rech_ids))
+            if rech_ids:
+                logger.warning("sync: la nube rechazó %d filas (marcadas aparte): %s",
+                               len(rech_ids), rech[:5])
+            return {"subidos": len(ok_ids), "insertados": resp.get("insertados"),
+                    "duplicados": resp.get("duplicados"), "rechazados": len(rech_ids)}
         finally:
             db.close()
 

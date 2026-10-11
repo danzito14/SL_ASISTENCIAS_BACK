@@ -24,7 +24,7 @@ from sqlalchemy.orm import Session
 
 from src.core.config import settings
 from src.models.Embedding_Model import Embedding
-from src.models.FotoPendiente_Model import FotoPendiente
+from src.models.FotoPendiente_Model import MOTIVOS_MAPEO, FotoPendiente
 from src.models.SyncEstado_Model import SyncEstado
 from src.services.Bulk_Service import bulk_service
 from src.services.Embedding_Service import embedding_service
@@ -71,13 +71,14 @@ class SyncService:
         objetivos = origenes or list(settings.sys21_urls.keys())
         resumen = SyncRunResponse(disparado_por=disparado_por, solo_datos=solo_datos, inicio=inicio)
 
-        # La clasificación de áreas se construye una vez (áreas locales activas).
-        clasificacion = ClasificacionAreas.construir(db)
-
         for origen in objetivos:
             r = SyncOrigenResultado(origen=origen)
             try:
+                # Una clasificación POR origen: puede crear áreas y, si el origen
+                # falla (rollback), su índice no debe arrastrar áreas que ya no existen.
+                clasificacion = ClasificacionAreas.construir(db)
                 self._sincronizar_origen(db, origen, clasificacion, r, solo_datos)
+                r.areas_creadas = clasificacion.areas_creadas
             except Exception as exc:  # noqa: BLE001 — un origen no debe tumbar al otro
                 db.rollback()
                 r.ok = False
@@ -92,9 +93,9 @@ class SyncService:
         resumen.mensaje = "Sincronización completada."
         logger.info(
             "Sync (%s) listo en %.1fs: %d leídos, %d nuevos, %d actualizados, "
-            "%d fotos ok, %d pendientes, %d desaparecidos, %d errores.",
+            "%d omitidos, %d fotos ok, %d pendientes, %d desaparecidos, %d errores.",
             disparado_por, resumen.duracion_seg, resumen.leidos, resumen.nuevos,
-            resumen.actualizados, resumen.fotos_ok, resumen.fotos_pendientes,
+            resumen.actualizados, resumen.omitidos, resumen.fotos_ok, resumen.fotos_pendientes,
             resumen.desaparecidos, resumen.errores,
         )
         return resumen
@@ -164,23 +165,37 @@ class SyncService:
         ya_registrados = bulk_service.cargar_id_trabajadores(db, origen)
         ahora = datetime.now(timezone.utc)
 
-        mapeados: list[mapping.TrabajadorMapeado] = []
-        filas_trab: list[dict] = []      # trabajadores nuevos/modificados → upsert
-        filas_sync: list[dict] = []      # sync_estado de TODOS los vistos → upsert
-
+        # 1) Leer y mapear TODA la nómina (los inválidos van a pendientes).
+        crudos: list[mapping.TrabajadorMapeado] = []
+        no_mapeados: set[str] = set()
         for fila in sys21_reader.leer_empleados(origen):
             r.leidos += 1
             mapeado, motivo = mapping.mapear_fila(fila, clasificacion)
             if mapeado is None:
                 r.errores += 1
+                no_mapeados.add(str(fila.get("id_emp")))
                 self._registrar_pendiente(
                     db, str(fila.get("id_emp")), origen, None, None, motivo,
                     detalle=f"empresa={fila.get('empresa_origen')} "
                             f"area_codigo={fila.get('area_codigo')} area_nombre={fila.get('area_nombre')}",
                 )
                 continue
+            crudos.append(mapeado)
 
-            mapeados.append(mapeado)
+        # Los rechazos de mapeo de corridas anteriores que YA no fallan (se agregó su
+        # regla/área, o ya no están en la nómina) se cierran: así /emp_sync/reglas/sin-regla
+        # solo muestra lo que sigue pendiente.
+        self._resolver_pendientes_mapeo(db, origen, no_mapeados)
+
+        # 2) Omitir homónimos para NO recrear duplicados: los que ya están en una
+        #    nómina de mayor prioridad (comercial > agrícola) y los 'II/III...' cuyo
+        #    nombre base ya se conserva en este mismo origen.
+        mapeados = self._omitir_homonimos(db, origen, crudos, r)
+
+        # 3) Decidir nuevos/modificados y armar los lotes de upsert.
+        filas_trab: list[dict] = []      # trabajadores nuevos/modificados → upsert
+        filas_sync: list[dict] = []      # sync_estado de los CONSERVADOS → upsert
+        for mapeado in mapeados:
             clave = (mapeado.id_emp, origen)
             h = hashing.hash_datos(mapeado.as_trabajador_dict())
             prev = estado_prev.get(clave)
@@ -220,6 +235,62 @@ class SyncService:
         # Desaparecidos → baja lógica.
         r.desaparecidos = bulk_service.soft_delete_no_vistos(db, origen)
         db.commit()
+
+    # ── Omitir homónimos (para no recrear duplicados) ─────────────────────────
+    def _omitir_homonimos(
+        self,
+        db: Session,
+        origen: str,
+        crudos: list[mapping.TrabajadorMapeado],
+        r: SyncOrigenResultado,
+    ) -> list[mapping.TrabajadorMapeado]:
+        """
+        Filtra homónimos para que el sync NO recree los duplicados que se limpiaron:
+
+          - CRUZANDO orígenes: si el nombre ya existe ACTIVO en una nómina de mayor
+            prioridad (comercial > agrícola), se omite (gana la de mayor prioridad).
+          - MISMO origen: los que traen sufijo romano (II, III...) cuyo nombre base ya
+            se conserva en esta corrida se omiten (son la re-alta de la misma persona).
+
+        Dos homónimos SIN numeral en el mismo origen se conservan ambos (podrían ser
+        personas distintas). Los omitidos no entran al upsert ni a sync_estado, así que
+        si ya existían, la fase de 'desaparecidos' los deja inactivos.
+        """
+        # Nombres activos de las nóminas que mandan (la comercial cuando corre agrícola).
+        prioritarios = {
+            mapping.clave_nombre(nombre, apellido)
+            for (nombre, apellido) in bulk_service.cargar_nombres_activos(
+                db, mapping.origenes_de_mayor_prioridad(origen)
+            )
+        }
+        prioritarios.discard("")
+
+        # Procesar primero los SIN numeral: así el nombre base se conserva y el 'II' se omite.
+        ordenados = sorted(
+            crudos,
+            key=lambda m: (1 if mapping.tiene_sufijo_romano(m.nombre, m.apellido) else 0, m.id_emp),
+        )
+
+        conservados: list[mapping.TrabajadorMapeado] = []
+        vistos: set[str] = set()
+        for m in ordenados:
+            clave = mapping.clave_nombre(m.nombre, m.apellido)
+            if not clave:
+                conservados.append(m)                      # sin nombre → no se deduplica
+                continue
+            if clave in prioritarios:                       # ya está en la nómina que manda
+                r.omitidos += 1
+                logger.info("Sync[%s]: omitido id_emp=%s '%s %s' (ya está en nómina de mayor prioridad).",
+                            origen, m.id_emp, m.nombre, m.apellido)
+                continue
+            if clave in vistos and mapping.tiene_sufijo_romano(m.nombre, m.apellido):
+                r.omitidos += 1                             # es el 'II/III...' y el base ya se conserva
+                logger.info("Sync[%s]: omitido id_emp=%s '%s %s' (duplicado con sufijo romano).",
+                            origen, m.id_emp, m.nombre, m.apellido)
+                continue
+            vistos.add(clave)
+            conservados.append(m)
+        return conservados
 
     # ── Fase de fotos ─────────────────────────────────────────────────────────
     def _procesar_fotos(
@@ -431,12 +502,28 @@ class SyncService:
             .values(estado="resuelto")
         )
 
+    def _resolver_pendientes_mapeo(self, db: Session, origen: str, siguen_fallando: set[str]) -> None:
+        """Cierra (resuelto) los rechazos de mapeo abiertos de quien ya no falla."""
+        stmt = (
+            update(FotoPendiente)
+            .where(
+                FotoPendiente.origen_nomina == origen,
+                FotoPendiente.estado == "pendiente",
+                FotoPendiente.motivo.in_(MOTIVOS_MAPEO),
+            )
+            .values(estado="resuelto")
+        )
+        if siguen_fallando:
+            stmt = stmt.where(FotoPendiente.id_emp.notin_(siguen_fallando))
+        db.execute(stmt)
+
     @staticmethod
     def _acumular(resumen: SyncRunResponse, r: SyncOrigenResultado) -> None:
         resumen.leidos += r.leidos
         resumen.nuevos += r.nuevos
         resumen.actualizados += r.actualizados
         resumen.sin_cambio += r.sin_cambio
+        resumen.omitidos += r.omitidos
         resumen.fotos_ok += r.fotos_ok
         resumen.fotos_pendientes += r.fotos_pendientes
         resumen.desaparecidos += r.desaparecidos

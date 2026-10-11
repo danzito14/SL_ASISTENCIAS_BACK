@@ -68,10 +68,24 @@ class BulkService:
         Baja lógica (estado='inactivo') de los trabajadores de un origen cuyo
         sync_estado quedó visto=False (desaparecieron de la nómina). No borra filas;
         el trigger de cascada inactiva su embedding. Devuelve cuántos cambiaron.
+
+        También borra su hash_datos: si reaparecen (p.ej. un fantasma que vuelve a
+        trabajar) su hash no habría cambiado y quedarían inactivos para siempre; sin
+        hash cuentan como modificados y el upsert los reactiva (y el trigger, su
+        embedding).
         """
         sub = select(SyncEstado.id_emp).where(
             SyncEstado.origen_nomina == origen,
             SyncEstado.visto_en_ultima_corrida.is_(False),
+        )
+        db.execute(
+            update(SyncEstado)
+            .where(
+                SyncEstado.origen_nomina == origen,
+                SyncEstado.visto_en_ultima_corrida.is_(False),
+                SyncEstado.hash_datos.isnot(None),
+            )
+            .values(hash_datos=None)
         )
         stmt = (
             update(Trabajador)
@@ -122,6 +136,22 @@ class BulkService:
             )
         ).all()
         return {(f.id_emp, origen): f.id_trabajador for f in filas}
+
+    def cargar_nombres_activos(self, db: Session, origenes: list[str]) -> list[tuple[str, str]]:
+        """
+        (nombre, apellido) de los trabajadores ACTIVOS de los orígenes dados. Se usa
+        para omitir homónimos: cuando corre la agrícola, se cargan los nombres de la
+        comercial (mayor prioridad) para no recrear al mismo empleado.
+        """
+        if not origenes:
+            return []
+        filas = db.execute(
+            select(Trabajador.nombre, Trabajador.apellido).where(
+                Trabajador.origen_nomina.in_(origenes),
+                Trabajador.estado == "activo",
+            )
+        ).all()
+        return [(f.nombre, f.apellido) for f in filas]
 
     def cargar_registrados(self, db: Session, origen: str, limite: int | None = None) -> list:
         """

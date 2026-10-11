@@ -11,14 +11,16 @@ from src.core.pgdb import Base
 #   validación local:  formato_invalido | resolucion_baja | archivo_corrupto | archivo_grande | muy_oscura | muy_clara
 #   recognition:       no_rostro | multiples_caras | det_score_bajo | cara_pequena | pose_no_frontal | borrosa | spoofing | recognition_no_disponible | duplicado
 #   sin archivo:       sin_foto
-#   mapeo:             area_invalida
+#   mapeo:             area_invalida | empresa_no_registrada | area_no_disponible
 MOTIVOS = (
     "formato_invalido", "resolucion_baja", "archivo_corrupto", "archivo_grande",
     "muy_oscura", "muy_clara",
     "sin_foto", "no_rostro", "multiples_caras", "det_score_bajo", "cara_pequena",
     "pose_no_frontal", "borrosa", "spoofing", "recognition_no_disponible",
-    "duplicado", "area_invalida",
+    "duplicado", "area_invalida", "empresa_no_registrada", "area_no_disponible",
 )
+# Motivos de MAPEO (el empleado no se registró; no son de foto).
+MOTIVOS_MAPEO = ("area_invalida", "empresa_no_registrada", "area_no_disponible")
 
 
 class FotoPendiente(Base):

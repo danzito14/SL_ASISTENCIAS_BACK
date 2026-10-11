@@ -17,7 +17,7 @@ from src.core.auth import Principal, exigir_empresa, resolver_empresa_scope, usu
 from src.core.config import settings
 from src.core.pgdb import SessionLocal, get_db
 from src.models.AreaTrabajo_Trabajador_Model import Trabajador
-from src.models.FotoPendiente_Model import MOTIVOS, FotoPendiente
+from src.models.FotoPendiente_Model import MOTIVOS, MOTIVOS_MAPEO, FotoPendiente
 from src.models.SyncEstado_Model import SyncEstado
 from src.schemas.FotoPendiente_Schema import (FotoPendienteResponse,
                                               FotoPendienteUpdate, MotivoCatalogo)
@@ -169,32 +169,35 @@ def resumen_fotos_pendientes(
 
 @router.get(
     "/fotos-pendientes/areas-invalidas",
-    summary="Áreas/puestos SIN clasificar (area_invalida) por origen",
-    description="Desglose de los rechazos 'area_invalida' por su detalle "
+    summary="Empleados SIN clasificar (motivos de mapeo) por origen",
+    description="Desglose de los rechazos de mapeo (area_invalida = puesto sin regla, "
+                "empresa_no_registrada, area_no_disponible) por su detalle "
                 "(empresa/area_codigo/area_nombre), ordenado por cuántos trabajadores "
-                "arrastra cada uno. Sirve para saber qué áreas etiquetar o mapear. "
-                "Nota: 'area_invalida' viene sin empresa, así que lo ve el super-admin.",
+                "arrastra cada uno. Sirve para saber qué reglas o empresas faltan. "
+                "Nota: estos rechazos vienen sin empresa, así que los ve el super-admin.",
 )
 def areas_invalidas(
     db: Session = Depends(get_db),
     id_empresa: int | None = Depends(resolver_empresa_scope),
     limite: int = Query(100, ge=1, le=1000),
 ):
-    q = (db.query(FotoPendiente.origen_nomina, FotoPendiente.detalle,
+    q = (db.query(FotoPendiente.origen_nomina, FotoPendiente.motivo, FotoPendiente.detalle,
                   func.count(FotoPendiente.id_pendiente).label("total"))
-           .filter(FotoPendiente.motivo == "area_invalida",
+           .filter(FotoPendiente.motivo.in_(MOTIVOS_MAPEO),
                    FotoPendiente.estado == "pendiente"))
     if id_empresa is not None:
         q = q.filter(FotoPendiente.id_empresa == id_empresa)
-    filas = (q.group_by(FotoPendiente.origen_nomina, FotoPendiente.detalle)
+    filas = (q.group_by(FotoPendiente.origen_nomina, FotoPendiente.motivo, FotoPendiente.detalle)
               .order_by(func.count(FotoPendiente.id_pendiente).desc()).limit(limite).all())
-    return [{"origen_nomina": o, "detalle": d, "total": n} for o, d, n in filas]
+    return [{"origen_nomina": o, "motivo": m, "detalle": d, "total": n} for o, m, d, n in filas]
 
 
 # Etiquetas legibles de los motivos (para la leyenda/filtros del panel).
 _MOTIVO_LABEL: dict[str, str] = {
     "sin_foto":                   "Sin foto en el servidor",
     "area_invalida":              "Área/puesto sin clasificar",
+    "empresa_no_registrada":      "Empresa no registrada en el sistema",
+    "area_no_disponible":         "Área de la empresa inactiva o no se pudo crear",
     "no_rostro":                  "No se detectó rostro",
     "multiples_caras":            "Varias caras en la foto",
     "det_score_bajo":             "Detección de baja calidad",

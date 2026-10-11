@@ -12,6 +12,8 @@ POST /trabajadores/{id_trabajador}/embedding.
 """
 
 import logging
+import re
+import unicodedata
 
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
@@ -24,6 +26,38 @@ from src.schemas.AreaTrabajo_Trabajador import TrabajadorCreate, TrabajadorUpdat
 from src.services.Tenancy_Service import tenancy_service
 
 logger = logging.getLogger(__name__)
+
+# ── Limpieza de duplicados por nombre ─────────────────────────────────────────
+# Sufijos romanos que marcan a un duplicado en la nómina ("JUAN PEREZ", "JUAN
+# PEREZ II"...). Se ignoran al comparar nombres. (Solo I..V, según el dato real.)
+_ROMANOS = {"I", "II", "III", "IV", "V"}
+
+# Prioridad de qué fila CONSERVAR cuando el mismo nombre está en varios orígenes:
+# la nómina comercial (agricola_com) manda sobre la agrícola; lo manual/otro, al final.
+_ORIGEN_PRIORIDAD = {"agricola_com": 0, "agricola": 1}
+
+
+def _tokens_nombre(nombre: str | None, apellido: str | None) -> list[str]:
+    """Nombre+apellido → tokens EN MAYÚSCULAS, sin acentos ni signos (para comparar)."""
+    completo = f"{nombre or ''} {apellido or ''}"
+    completo = unicodedata.normalize("NFKD", completo)
+    completo = "".join(c for c in completo if not unicodedata.combining(c))
+    return re.findall(r"[A-Z]+", completo.upper())
+
+
+def _tiene_sufijo_romano(nombre: str | None, apellido: str | None) -> bool:
+    """True si el nombre termina en un numeral romano I..V (marca de duplicado)."""
+    tokens = _tokens_nombre(nombre, apellido)
+    return bool(tokens) and tokens[-1] in _ROMANOS
+
+
+def _clave_nombre(nombre: str | None, apellido: str | None) -> str:
+    """Clave de agrupación: nombre normalizado SIN el sufijo romano final.
+    'Juan Pérez' y 'JUAN PEREZ III' comparten clave 'JUAN PEREZ'."""
+    tokens = _tokens_nombre(nombre, apellido)
+    while tokens and tokens[-1] in _ROMANOS:
+        tokens.pop()
+    return " ".join(tokens)
 
 
 class TrabajadorService:
@@ -241,6 +275,29 @@ class TrabajadorService:
 
         cambios = datos.model_dump(exclude_unset=True)
 
+        # id_emp (no. de nómina SYS21) es único por (id_emp, origen_nomina). Si lo
+        # cambian a uno ya tomado por otro trabajador del mismo origen, avisar claro
+        # en vez de dejar reventar el UNIQUE de la BD.
+        if cambios.get("id_emp"):
+            origen = trabajador.origen_nomina
+            ocupado = (
+                db.query(Trabajador.id_trabajador)
+                .filter(
+                    Trabajador.id_emp == cambios["id_emp"],
+                    Trabajador.origen_nomina == origen,
+                    Trabajador.id_trabajador != id_trabajador,
+                )
+                .first()
+            )
+            if ocupado:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=(
+                        f"Ya existe otro trabajador con el número de empleado "
+                        f"'{cambios['id_emp']}' en el origen '{origen or 'manual'}'."
+                    ),
+                )
+
         if "id_area" in cambios and cambios["id_area"] is not None:
             area = tenancy_service.obtener_area_activa(cambios["id_area"], db)
             if not area:
@@ -271,6 +328,110 @@ class TrabajadorService:
             )
         db.refresh(trabajador)
         return trabajador
+
+    # ── Limpieza de duplicados por nombre ──────────────────────────────────────
+    def _orden_canonico(self, t: Trabajador, con_embedding: set[int]) -> tuple:
+        """Clave de orden: el MENOR es el que se CONSERVA dentro de un grupo de
+        homónimos. Prioridad: 1) origen comercial (agricola_com) sobre agrícola,
+        2) nombre SIN numeral romano, 3) con rostro registrado, 4) con id_emp de
+        SYS21, 5) el más antiguo (menor id)."""
+        return (
+            _ORIGEN_PRIORIDAD.get(t.origen_nomina, 2),
+            1 if _tiene_sufijo_romano(t.nombre, t.apellido) else 0,
+            0 if t.id_trabajador in con_embedding else 1,
+            0 if t.id_emp else 1,
+            t.id_trabajador,
+        )
+
+    @staticmethod
+    def _brief_dup(t: Trabajador, con_embedding: set[int]) -> dict:
+        return {
+            "id_trabajador": t.id_trabajador,
+            "id_emp": t.id_emp,
+            "origen_nomina": t.origen_nomina,
+            "nombre": t.nombre,
+            "apellido": t.apellido,
+            "id_empresa": t.id_empresa,
+            "tiene_embedding": t.id_trabajador in con_embedding,
+        }
+
+    def limpiar_duplicados(self, db: Session, simular: bool = True) -> dict:
+        """
+        Detecta trabajadores ACTIVOS con el mismo nombre (ignorando acentos y el
+        sufijo romano I..V) y, por grupo, conserva uno y BORRA TOTALMENTE el resto.
+
+        Agrupa CRUZANDO orígenes/empresas: si 'Juan Pérez' está en la comercial y en
+        la agrícola, conserva la comercial (ver _orden_canonico). El borrado es físico;
+        embeddings caen por CASCADE, pero si un duplicado tiene asistencias/escaneos/
+        incidencias (FK RESTRICT) no se puede borrar: se salta y se reporta, sin
+        abortar el resto (cada borrado va en su propio savepoint).
+
+        Args:
+            simular: si True (default) NO borra nada; solo devuelve el plan.
+
+        Returns:
+            dict con el resumen y el detalle por grupo (ver LimpiezaDuplicadosResponse).
+        """
+        activos = db.query(Trabajador).filter(Trabajador.estado == "activo").all()
+        ids = [t.id_trabajador for t in activos]
+        con_embedding = {
+            id_trab
+            for (id_trab,) in db.query(Embedding.id_trabajador)
+            .filter(Embedding.id_trabajador.in_(ids))
+            .distinct()
+            .all()
+        } if ids else set()
+
+        # Agrupar por nombre normalizado (sin numeral romano). Ignora sin nombre.
+        grupos: dict[str, list[Trabajador]] = {}
+        for t in activos:
+            clave = _clave_nombre(t.nombre, t.apellido)
+            if clave:
+                grupos.setdefault(clave, []).append(t)
+
+        detalle: list[dict] = []
+        eliminados = 0
+        no_eliminados: list[dict] = []
+
+        for clave, grupo in grupos.items():
+            if len(grupo) < 2:
+                continue
+            grupo.sort(key=lambda t: self._orden_canonico(t, con_embedding))
+            conservado, duplicados = grupo[0], grupo[1:]
+
+            for d in duplicados:
+                if not simular:
+                    try:
+                        with db.begin_nested():
+                            db.delete(d)
+                            db.flush()
+                        eliminados += 1
+                    except IntegrityError:
+                        no_eliminados.append({
+                            "id_trabajador": d.id_trabajador,
+                            "nombre": d.nombre,
+                            "apellido": d.apellido,
+                            "motivo": "tiene registros dependientes (asistencias/"
+                                      "escaneos/incidencias); dalo de baja en su lugar.",
+                        })
+
+            detalle.append({
+                "nombre_clave": clave,
+                "conservado": self._brief_dup(conservado, con_embedding),
+                "eliminados": [self._brief_dup(d, con_embedding) for d in duplicados],
+            })
+
+        if not simular:
+            db.commit()
+
+        return {
+            "simulado": simular,
+            "grupos_con_duplicados": len(detalle),
+            "duplicados_detectados": sum(len(g["eliminados"]) for g in detalle),
+            "eliminados": eliminados,
+            "no_eliminados": no_eliminados,
+            "detalle": detalle,
+        }
 
     def eliminar_trabajador(self, id_trabajador: int, db: Session) -> Trabajador:
         """
