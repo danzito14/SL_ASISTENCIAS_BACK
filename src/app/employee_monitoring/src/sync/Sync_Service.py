@@ -23,10 +23,12 @@ from sqlalchemy import update
 from sqlalchemy.orm import Session
 
 from src.core.config import settings
+from src.models.AreaTrabajo_Trabajador_Model import Trabajador
 from src.models.Embedding_Model import Embedding
 from src.models.FotoPendiente_Model import MOTIVOS_MAPEO, FotoPendiente
 from src.models.SyncEstado_Model import SyncEstado
 from src.services.Bulk_Service import bulk_service
+from src.services.Cloudinary_Service import cloudinary_service
 from src.services.Embedding_Service import embedding_service
 from src.services.Recognition_Service import recognition_service
 from src.sources import sys21_reader
@@ -70,6 +72,9 @@ class SyncService:
         inicio = datetime.now(timezone.utc)
         objetivos = origenes or list(settings.sys21_urls.keys())
         resumen = SyncRunResponse(disparado_por=disparado_por, solo_datos=solo_datos, inicio=inicio)
+        # Historial de auditoría: los cambios del sync quedan firmados por él (si quien
+        # lo lanzó a mano no se indicó ya en la sesión).
+        db.info.setdefault("auditoria", {"usuario": f"sync SYS21 ({disparado_por})"})
 
         for origen in objetivos:
             r = SyncOrigenResultado(origen=origen)
@@ -312,6 +317,7 @@ class SyncService:
         try:
             for lote in _chunks(mapeados, settings.SYNC_BATCH_SIZE):
                 a_reconocer: list[_Pendiente] = []
+                a_subir: list[tuple[str, bytes]] = []   # (id_emp, foto) aceptadas → Cloudinary
 
                 # A) stat + descarga + validación local (serial: SFTP no es thread-safe)
                 for m in lote:
@@ -327,9 +333,15 @@ class SyncService:
                         r.fotos_pendientes += 1
                         continue
 
-                    # Sin cambio de foto (mismo mtime/size) → no reprocesar.
+                    # Sin cambio de foto (mismo mtime/size) → no reprocesar. Si ya estaba
+                    # aceptada pero aún no tiene copia en Cloudinary, solo se sube.
                     if prev and prev["foto_mtime"] == mtime and prev["foto_size"] == size \
                             and prev["estado_foto"] in ("ok", "pendiente"):
+                        if prev["estado_foto"] == "ok" and not prev.get("foto_url") \
+                                and cloudinary_service.activo:
+                            data = sftp.descargar_por_id_emp(m.id_emp)
+                            if data:
+                                a_subir.append((m.id_emp, data))
                         continue
 
                     data = sftp.descargar_por_id_emp(m.id_emp)
@@ -388,10 +400,49 @@ class SyncService:
                     self._actualizar_estado_foto(db, p.mapeado.id_emp, origen, "ok",
                                                  p.hash_foto, p.mtime, p.size, marca_ok=True)
                     r.fotos_ok += 1
+                    a_subir.append((p.mapeado.id_emp, p.foto_bytes))
 
                 db.commit()
+
+                # D) copia en Cloudinary de las aceptadas (I/O en paralelo; si falla, la URL
+                #    queda NULL y se reintenta en la próxima corrida).
+                self._subir_a_cloudinary(db, origen, a_subir, r)
         finally:
             sftp.cerrar()
+
+    def _subir_a_cloudinary(self, db: Session, origen: str, fotos: list[tuple[str, bytes]],
+                            r: SyncOrigenResultado) -> None:
+        if not fotos or not cloudinary_service.activo:
+            return
+        urls: dict[str, str] = {}
+        with ThreadPoolExecutor(max_workers=settings.CLODINARY_CONCURRENCIA) as ex:
+            futuros = {ex.submit(cloudinary_service.subir_foto_trabajador, data, origen, id_emp): id_emp
+                       for id_emp, data in fotos}
+            for fut in as_completed(futuros):
+                try:
+                    url = fut.result()
+                except Exception:  # noqa: BLE001
+                    url = None
+                if url:
+                    urls[futuros[fut]] = url
+        ahora = datetime.now(timezone.utc)
+        for id_emp, url in urls.items():
+            db.execute(
+                update(SyncEstado)
+                .where(SyncEstado.id_emp == id_emp, SyncEstado.origen_nomina == origen)
+                .values(foto_url=url, foto_subida_en=ahora)
+            )
+            # La foto que consulta el sistema (la misma que actualiza el panel de workers).
+            db.execute(
+                update(Trabajador)
+                .where(Trabajador.id_emp == id_emp, Trabajador.origen_nomina == origen)
+                .values(foto_url=url, foto_subida_en=ahora)
+            )
+        db.commit()
+        r.fotos_subidas += len(urls)
+        if len(urls) < len(fotos):
+            logger.warning("Sync[%s]: %d de %d fotos no se pudieron subir a Cloudinary (se reintentan).",
+                           origen, len(fotos) - len(urls), len(fotos))
 
     # ── Helpers ───────────────────────────────────────────────────────────────
     def _evaluar_recognition(self, res: dict | None, db: Session, id_trab: int,
@@ -526,6 +577,7 @@ class SyncService:
         resumen.omitidos += r.omitidos
         resumen.fotos_ok += r.fotos_ok
         resumen.fotos_pendientes += r.fotos_pendientes
+        resumen.fotos_subidas += r.fotos_subidas
         resumen.desaparecidos += r.desaparecidos
         resumen.errores += r.errores
 

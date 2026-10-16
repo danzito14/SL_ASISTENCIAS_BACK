@@ -116,13 +116,14 @@ class BulkService:
             select(
                 SyncEstado.id_emp, SyncEstado.hash_datos, SyncEstado.hash_foto,
                 SyncEstado.foto_mtime, SyncEstado.foto_size, SyncEstado.estado_foto,
+                SyncEstado.foto_url,
             ).where(SyncEstado.origen_nomina == origen)
         ).all()
         return {
             (f.id_emp, origen): {
                 "hash_datos": f.hash_datos, "hash_foto": f.hash_foto,
                 "foto_mtime": f.foto_mtime, "foto_size": f.foto_size,
-                "estado_foto": f.estado_foto,
+                "estado_foto": f.estado_foto, "foto_url": f.foto_url,
             }
             for f in filas
         }

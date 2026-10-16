@@ -28,6 +28,8 @@ class EmbeddingResponse(EmbeddingBase):
     id_embedding:  int
     fecha_captura: datetime
     # El vector no se expone en la respuesta por tamaño
+    # Solo lo llena PUT /embeddings/trabajador/{id}/foto: copia en Cloudinary de la foto.
+    foto_url:      str | None = None
 
     model_config = {"from_attributes": True}
 
