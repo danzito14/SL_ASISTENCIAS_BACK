@@ -2,7 +2,7 @@
 # Agrupa cámaras de SEGUIMIENTO (reid) por DVR/grabador: la contraseña del DVR vive
 # UNA vez aquí (cifrada Fernet) y las cámaras del grupo la REUSAN (no repiten password).
 # Espeja el patrón de Camara_Model: las columnas cruzadas (id_empresa) van como Integer
-# plano; el FK a empresas lo enforcea la BD (migración 2026_07_reid_grupos.sql).
+# plano; el FK a empresas lo enforcea la BD (migración 2026_07_01_reid_grupos.sql).
 from datetime import datetime, timezone
 
 from sqlalchemy import Column, DateTime, Integer, LargeBinary, String
