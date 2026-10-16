@@ -2,7 +2,7 @@
 # workers es dueño de Trabajador (+ Embedding). AreaTrabajo pertenece a tenancy;
 # aquí se incluye una copia MÍNIMA (solo lo que el facade Tenancy_Service lee:
 # id_area/id_empresa/estado) y SIN relaciones cross-domain.
-from sqlalchemy import Column, Integer, String, Boolean, DateTime, ForeignKey, LargeBinary
+from sqlalchemy import Column, Integer, String, Boolean, DateTime, ForeignKey, LargeBinary, Text
 from sqlalchemy.orm import relationship
 from datetime import datetime, timezone
 from src.core.pgdb import Base
@@ -35,6 +35,9 @@ class Trabajador(Base):
     permiso_escaneo = Column(String(20), nullable=False, default="campo")
     nivel_acceso_interno = Column(String(20), nullable=True, default=None)  # NULL = sin acceso interno (campo)
     foto_perfil = Column(LargeBinary)
+    # Última foto ACEPTADA copiada en Cloudinary (panel o sync SYS21).
+    foto_url = Column(Text, nullable=True, default=None)
+    foto_subida_en = Column(DateTime(timezone=True), nullable=True, default=None)
     estado = Column(String(15), default="activo")
     inactivo_por_cascada = Column(Boolean, nullable=False, default=False)
     fecha_creacion = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))

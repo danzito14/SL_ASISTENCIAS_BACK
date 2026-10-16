@@ -98,6 +98,7 @@ class TrabajadorResponse(TrabajadorBase):
     fecha_creacion: datetime
     fecha_actualizacion: datetime
     tiene_embedding: bool = False  # True si el trabajador ya tiene un embedding facial registrado
+    foto_url: str | None = None    # última foto aceptada en Cloudinary (panel o sync SYS21)
 
     model_config = {"from_attributes": True}
 
@@ -121,6 +122,7 @@ class TrabajadorRegistroResponse(BaseModel):
     dimensiones: int
     calidad: float
     mensaje: str = "Trabajador registrado correctamente."
+    foto_url: str | None = None    # copia en Cloudinary; None = no se pudo subir (rostro registrado igual)
 
     model_config = {"from_attributes": True}
 

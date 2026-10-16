@@ -29,9 +29,13 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/emp_sync", tags=["Sync"])
 
 
-def _correr_sync_async(origenes: list[str] | None, solo_datos: bool) -> None:
+def _correr_sync_async(origenes: list[str] | None, solo_datos: bool,
+                       usuario: Principal | None = None) -> None:
     """Corre el sync con su propia sesión (para BackgroundTasks)."""
     db = SessionLocal()
+    if usuario is not None:   # historial de auditoría: quién lo lanzó
+        db.info["auditoria"] = {"id_usuario": usuario.id_usuario,
+                                "usuario": f"sync SYS21 (manual: {usuario.nombre_usuario})"}
     try:
         sync_service.ejecutar_sync(db, disparado_por="manual", origenes=origenes, solo_datos=solo_datos)
     except Exception:  # noqa: BLE001
@@ -64,7 +68,7 @@ def lanzar_sync(
     usuario: Principal = Depends(usuario_actual),
 ):
     origenes = [origen] if origen else None
-    background.add_task(_correr_sync_async, origenes, solo_datos)
+    background.add_task(_correr_sync_async, origenes, solo_datos, usuario)
     return SyncRunAceptado()
 
 
@@ -97,6 +101,7 @@ def estado_sync(
     db: Session = Depends(get_db),
     id_empresa: int | None = Depends(resolver_empresa_scope),
     origen: str | None = Query(None),
+    id_emp: str | None = Query(None, description="Número de empleado de la nómina (p. ej. para ver su foto_url)."),
     estado_foto: str | None = Query(None, description="Filtra por estado_foto: ok | pendiente | sin_foto"),
     skip: int = 0,
     limit: int = Query(100, le=500),
@@ -104,6 +109,8 @@ def estado_sync(
     query = db.query(SyncEstado)
     if id_empresa is not None:
         query = query.filter(SyncEstado.id_empresa == id_empresa)
+    if id_emp:
+        query = query.filter(SyncEstado.id_emp == id_emp.strip())
     if origen is not None:
         query = query.filter(SyncEstado.origen_nomina == origen)
     if estado_foto is not None:

@@ -1,15 +1,18 @@
 # app/api/v1/endpoints/embeddings.py
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
 from sqlalchemy.orm import Session
+from starlette.concurrency import run_in_threadpool
 
 from src.core.auth import exigir_empresa, resolver_empresa_scope, usuario_actual
 from src.core.pgdb import get_db
 from src.core.auth import Principal as Usuario
+from src.models.AreaTrabajo_Trabajador_Model import Trabajador
 from src.schemas.Embedding_Schema import (
     EmbeddingDeleteResponse,
     EmbeddingResponse,
     EmbeddingUpdate,
 )
+from src.services.Cloudinary_Service import guardar_foto_trabajador
 from src.services.Embedding_Service import embedding_service
 from src.services.Recognition_Service import recognition_service
 
@@ -145,9 +148,17 @@ async def reemplazar_embedding_foto(
 
     # 5. Actualizar la fila existente con el nuevo vector
     cara = {"embedding": res["embedding"], "det_score": res["det_score"]}
-    return embedding_service.reemplazar_vector_por_trabajador(
+    embedding = embedding_service.reemplazar_vector_por_trabajador(
         id_trabajador=id_trabajador, cara=cara, db=db
     )
+    respuesta = EmbeddingResponse.model_validate(embedding)
+
+    # 6. Copia de la foto aceptada en Cloudinary (reemplaza la anterior; si falla, el
+    #    rostro queda actualizado igual).
+    trabajador = db.get(Trabajador, id_trabajador)
+    if trabajador is not None:
+        respuesta.foto_url = await run_in_threadpool(guardar_foto_trabajador, db, trabajador, contenido)
+    return respuesta
 
 
 # ── Eliminar embedding (BORRADO TOTAL) ────────────────────────────────────────

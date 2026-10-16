@@ -344,6 +344,12 @@ services:
       GATEWAY_INTERNAL_TOKEN: ${GATEWAY_INTERNAL_TOKEN:-CAMBIAR_gateway_token}
       RECOGNITION_SERVICE_URL: "http://recognition:8000"
       RECOGNITION_INTERNAL_TOKEN: ${RECOGNITION_INTERNAL_TOKEN}
+      # Copia en Cloudinary de la foto aceptada al registrar/actualizar rostro (mismas
+      # credenciales que employee_monitoring). Sin ellas, el rostro se registra sin subir.
+      CLOUD_NAME_CLODINARY: ${CLOUD_NAME_CLODINARY:-}
+      API_KEY_CLODINARY: ${API_KEY_CLODINARY:-}
+      API_SECRET_CLODINARY: ${API_SECRET_CLODINARY:-}
+      CLODINARY_CARPETA: ${CLODINARY_CARPETA:-SL-Asistencias}
     labels:
       - "traefik.enable=true"
       - "traefik.http.routers.workers.rule=PathPrefix(`/trabajadores`) || PathPrefix(`/embeddings`) || PathPrefix(`/api/trabajadores`) || PathPrefix(`/api/embeddings`)"
@@ -392,6 +398,12 @@ services:
       FOTOS_SFTP_USER: ${FOTOS_SFTP_USER}
       FOTOS_SFTP_KEY_PATH: /run/secrets/fotos/fotos_ssh_key
       FOTOS_SFTP_BASE_DIR: ${FOTOS_SFTP_BASE_DIR}
+      # Copia de las fotos ACEPTADAS en Cloudinary (carpeta SL-Asistencias/<origen>/<id_emp>).
+      # Si falta alguna de las 3, la subida se desactiva sola.
+      CLOUD_NAME_CLODINARY: ${CLOUD_NAME_CLODINARY:-}
+      API_KEY_CLODINARY: ${API_KEY_CLODINARY:-}
+      API_SECRET_CLODINARY: ${API_SECRET_CLODINARY:-}
+      CLODINARY_CARPETA: ${CLODINARY_CARPETA:-SL-Asistencias}
       # Sincronización / scheduler (CRON en hora local, escalonado por origen)
       SYNC_ENABLED: "true"
       SYNC_RUN_ON_STARTUP: "false"

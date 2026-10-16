@@ -6,7 +6,7 @@
 from datetime import datetime, timezone
 
 from sqlalchemy import (
-    BigInteger, Boolean, Column, DateTime, Integer, String, UniqueConstraint,
+    BigInteger, Boolean, Column, DateTime, Integer, String, Text, UniqueConstraint,
 )
 
 from src.core.pgdb import Base
@@ -25,6 +25,8 @@ class SyncEstado(Base):
     foto_mtime              = Column(BigInteger)   # mtime remoto (SFTP): foto nueva sin descargar
     foto_size               = Column(BigInteger)   # tamaño remoto (SFTP), idem
     estado_foto             = Column(String(20))   # 'ok' | 'pendiente' | 'sin_foto'
+    foto_url                = Column(Text)         # copia en Cloudinary de la foto ACEPTADA
+    foto_subida_en          = Column(DateTime(timezone=True))
     visto_en_ultima_corrida = Column(Boolean, nullable=False, default=False)
     ultima_sync             = Column(DateTime(timezone=True))
     ultima_sync_ok          = Column(DateTime(timezone=True))

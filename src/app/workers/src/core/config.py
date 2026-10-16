@@ -30,6 +30,18 @@ class Settings(BaseSettings):
     RECOGNITION_SERVICE_URL: str = "http://recognition:8000"
     RECOGNITION_INTERNAL_TOKEN: str = os.getenv("RECOGNITION_INTERNAL_TOKEN", "")
 
+    # Cloudinary: copia de la foto ACEPTADA al registrar/actualizar un rostro desde
+    # el panel. Mismas credenciales y carpeta que employee_monitoring. Si falta
+    # alguna de las 3, no se sube (el rostro se registra igual).
+    CLOUD_NAME_CLODINARY: str = ""
+    API_KEY_CLODINARY: str = ""
+    API_SECRET_CLODINARY: str = ""
+    CLODINARY_CARPETA: str = "SL-Asistencias"
+
+    @property
+    def cloudinary_activo(self) -> bool:
+        return bool(self.CLOUD_NAME_CLODINARY and self.API_KEY_CLODINARY and self.API_SECRET_CLODINARY)
+
     @property
     def roles_token_sin_expiracion(self) -> set[str]:
         return {r.strip() for r in self.ROLES_TOKEN_SIN_EXPIRACION.split(",") if r.strip()}

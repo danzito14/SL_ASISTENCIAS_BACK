@@ -1,6 +1,7 @@
 # app/api/v1/endpoints/trabajadores.py
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
 from sqlalchemy.orm import Session
+from starlette.concurrency import run_in_threadpool
 
 from src.core.auth import es_admin, exigir_empresa, resolver_empresa_scope, usuario_actual
 from src.core.pgdb import get_db
@@ -14,6 +15,7 @@ from src.schemas.AreaTrabajo_Trabajador import (
     TrabajadorResponse,
     TrabajadorUpdate,
 )
+from src.services.Cloudinary_Service import guardar_foto_trabajador
 from src.services.Trabajador_Service import trabajador_service
 from src.services.Recognition_Service import recognition_service
 from src.services.Embedding_Service import embedding_service
@@ -260,6 +262,9 @@ async def registrar_embedding_foto(
     db.commit()
     db.refresh(embedding)
 
+    # 6. Copia de la foto aceptada en Cloudinary (si falla, el rostro queda registrado igual).
+    foto_url = await run_in_threadpool(guardar_foto_trabajador, db, trabajador, contenido)
+
     return TrabajadorRegistroResponse(
         trabajador=trabajador,
         embedding_id=embedding.id_embedding,
@@ -267,4 +272,5 @@ async def registrar_embedding_foto(
         dimensiones=VECTOR_DIM,
         calidad=float(embedding.calidad_embedding),
         mensaje=f"Embedding de {trabajador.nombre} {trabajador.apellido} registrado desde foto.",
+        foto_url=foto_url,
     )

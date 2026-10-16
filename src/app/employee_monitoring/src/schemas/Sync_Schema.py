@@ -14,6 +14,7 @@ class SyncOrigenResultado(BaseModel):
     omitidos:        int = 0             # homónimos omitidos (duplicados por nombre)
     fotos_ok:        int = 0
     fotos_pendientes: int = 0
+    fotos_subidas:   int = 0             # fotos aceptadas copiadas a Cloudinary
     desaparecidos:   int = 0
     errores:         int = 0
     areas_creadas:   list[str] = []       # áreas ("empresa: nombre") que creó el clasificador
@@ -35,6 +36,7 @@ class SyncRunResponse(BaseModel):
     omitidos:        int = 0             # homónimos omitidos (duplicados por nombre)
     fotos_ok:        int = 0
     fotos_pendientes: int = 0
+    fotos_subidas:   int = 0             # fotos aceptadas copiadas a Cloudinary
     desaparecidos:   int = 0
     errores:         int = 0
     por_origen:      list[SyncOrigenResultado] = []
@@ -57,5 +59,6 @@ class SyncEstadoResponse(BaseModel):
     visto_en_ultima_corrida: bool
     ultima_sync:             datetime | None = None
     ultima_sync_ok:          datetime | None = None
+    foto_url:                str | None = None   # copia en Cloudinary de la foto aceptada
 
     model_config = {"from_attributes": True}

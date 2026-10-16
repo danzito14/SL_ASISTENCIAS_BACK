@@ -34,6 +34,15 @@ class Settings(BaseSettings):
     FOTOS_SFTP_BASE_DIR:       str = "."          # carpeta remota base de las fotos
     FOTOS_EXTENSIONES:         str = "jpg,jpeg,png"  # se prueban en orden para <id_emp>.<ext>
 
+    # ── Cloudinary: copia de las fotos ACEPTADAS para consultarlas después ─────
+    # Se suben a <CARPETA>/<origen>/<id_emp> (se reemplaza si cambia la foto). Si
+    # falta cualquiera de las 3 credenciales, la subida se desactiva sola.
+    CLOUD_NAME_CLODINARY:      str = ""
+    API_KEY_CLODINARY:         str = ""
+    API_SECRET_CLODINARY:      str = ""
+    CLODINARY_CARPETA:         str = "SL-Asistencias"
+    CLODINARY_CONCURRENCIA:    int = 4               # subidas en paralelo
+
     # ── Validación de foto (estricta, configurable) ───────────────────────────
     # Local (PIL):
     FOTO_MIN_WIDTH:        int = 320
@@ -108,6 +117,10 @@ class Settings(BaseSettings):
             "agricola_com": self.SYS_21_URL_AGRICOLA_COM,
         }
         return {origen: url for origen, url in urls.items() if url}
+
+    @property
+    def cloudinary_activo(self) -> bool:
+        return bool(self.CLOUD_NAME_CLODINARY and self.API_KEY_CLODINARY and self.API_SECRET_CLODINARY)
 
     @property
     def foto_extensiones_list(self) -> list[str]:
